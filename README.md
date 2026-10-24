@@ -10,7 +10,7 @@ devicehubctl <udid> tree             # what's on the device's screen
 devicehubctl <udid> tap "Continue"   # tap it
 ```
 
-More about it, with screenshots of each pose:
+More about it:
 [individuation.dev/projects/devicehubctl](https://individuation.dev/projects/devicehubctl/).
 
 ## Why

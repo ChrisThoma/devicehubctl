@@ -62,8 +62,9 @@ cp .build/release/devicehubctl /usr/local/bin/
 `<udid>` comes from `xcrun simctl list devices`. You can pass `booted` when exactly
 one simulator is booted. With more than one, it refuses rather than guess.
 
-If no DeviceHub window shows the simulator, `devicehubctl` opens a new window for
-it rather than switching one you or another tool are looking at.
+If no DeviceHub window shows the simulator, `devicehubctl` first reuses a window
+left on a simulator that isn't booted, and otherwise opens a new window, rather
+than switching one you or another tool are looking at.
 
 ### Several simulators at once
 

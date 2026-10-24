@@ -164,6 +164,16 @@ func window(for udid: String, _ app: AXUIElement) -> AXUIElement {
   guard state == "Booted" else { fail("\(name) is \(state). Boot it first: xcrun simctl boot \(udid)") }
   if let w = windowShowing(app, device) { return w }
 
+  // A window left on a device that isn't booted (its simulator was shut down,
+  // or a reattach didn't switch back) is nobody's view, so it's reused before
+  // opening another. Without this, windows pile up over a day of sessions.
+  let booted = Set(simctlDevices().filter { ($0["state"] as? String) == "Booted" }.compactMap { $0["udid"] as? String })
+  if let idle = windows(app).first(where: { selectedUDID($0).map { !booted.contains($0) } ?? false }),
+     select(idle, udid),
+     waitFor(10, { str(idle, "AXTitle").hasPrefix(name + " – ") ? true : nil }) != nil {
+    return idle
+  }
+
   let before = Set(windows(app).map { CFHash($0) })
   pressMenu(app, "File", "New Window")
   guard let fresh = waitFor(10, { windows(app).first { !before.contains(CFHash($0)) } }) else {

@@ -66,8 +66,9 @@ you hand simulator work to a subagent, say so alongside the UDID.
 
 - Only drive a simulator you booted or were assigned. `devicehubctl` refuses one
   that isn't booted and won't start one.
-- If no DeviceHub window shows that device, it opens a new window instead of
-  switching one a person or another agent is looking at. Leave other windows
+- If no DeviceHub window shows that device, it reuses a window left on a device
+  that isn't booted, or else opens a new window, instead of switching one a
+  person or another agent is looking at. Leave other windows
   alone.
 - It needs the Mac unlocked. While the screen is locked, DeviceHub hides its
   windows from accessibility and `devicehubctl` says so. Tell the user instead of

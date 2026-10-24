@@ -72,6 +72,10 @@ you hand simulator work to a subagent, say so alongside the UDID.
 - It needs the Mac unlocked. While the screen is locked, DeviceHub hides its
   windows from accessibility and `devicehubctl` says so. Tell the user instead of
   retrying in a loop.
+- Several simulators can be driven at once, from several agents. Windows are
+  matched by UDID, and concurrent runs wait for each other through a lock file.
+- Never close a DeviceHub window or quit DeviceHub: either shuts down the
+  simulators it shows, including other people's.
 - Shut down what you booted when you're done (`xcrun simctl shutdown <udid>`).
 
 ## When it breaks
@@ -80,5 +84,9 @@ you hand simulator work to a subagent, say so alongside the UDID.
   agent host) needs it in System Settings > Privacy & Security > Accessibility.
   Ask the user to grant it.
 - "DeviceHub isn't running": `open -a DeviceHub`.
+- "DeviceHub isn't answering accessibility requests": it needs a relaunch, which
+  shuts down every simulator it shows. Ask the user before quitting it.
+- "Tapped ...; DeviceHub didn't confirm it": usually the tap opened something and
+  the element went away. Run `tree` to see where you are.
 - A pose or rotate label not found: run `controls` and compare. An Xcode update
   may have renamed DeviceHub's buttons. Report the new labels upstream.

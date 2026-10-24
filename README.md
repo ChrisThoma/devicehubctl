@@ -65,6 +65,27 @@ one simulator is booted. With more than one, it refuses rather than guess.
 If no DeviceHub window shows the simulator, `devicehubctl` opens a new window for
 it rather than switching one you or another tool are looking at.
 
+### Several simulators at once
+
+Each simulator gets its own DeviceHub window, matched by the UDID selected in the
+window's sidebar, so two simulators with the same name never get mixed up. Runs
+from different terminals or agents take turns through a lock file, so they never
+open windows at the same moment. Tested with two iPhone Duo simulators unfolded at
+the same time, and again with both renamed to the same name.
+
+With several devices open, DeviceHub sometimes leaves a window's screen tree
+empty. When `tree` or `tap` find it empty, `devicehubctl` briefly shows a
+shut-down simulator in that window and switches back, which brings it back. The
+running simulator isn't touched.
+
+Two DeviceHub behaviors to know about:
+
+- **Closing a DeviceHub window shuts down the simulator it shows,** and quitting
+  DeviceHub shuts down all of them.
+- **DeviceHub's accessibility interface can stop answering** even while the app
+  is idle. `devicehubctl` says so when it happens. Quitting and reopening
+  DeviceHub fixes it, then boot the simulators again.
+
 ### iPhone Duo screenshots
 
 The Duo has two displays. Name the one you want:

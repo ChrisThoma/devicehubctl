@@ -10,6 +10,9 @@ devicehubctl <udid> tree             # what's on the device's screen
 devicehubctl <udid> tap "Continue"   # tap it
 ```
 
+More about it, with screenshots of each pose:
+[individuation.dev/projects/devicehubctl](https://individuation.dev/projects/devicehubctl/).
+
 ## Why
 
 In Xcode 27, DeviceHub replaced Simulator.app, and the only way to change an

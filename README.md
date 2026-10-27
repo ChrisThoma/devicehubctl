@@ -1,5 +1,7 @@
 # devicehubctl
 
+![devicehubctl: fold, rotate and tap iOS simulators from the terminal](https://individuation.dev/projects/devicehubctl/share-card.png)
+
 Fold, unfold and rotate iOS simulators from the command line, and read or tap
 what's on their screen, through Xcode 27's DeviceHub.
 

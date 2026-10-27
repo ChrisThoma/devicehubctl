@@ -7,10 +7,15 @@
 // given UDID (opening a new one rather than taking over a window another
 // session is looking at) and presses a button there by its label.
 //
+// Long presses, drags and Split View use real touches instead, sent to the
+// simulator's digitizer service (see Touches below).
+//
 // https://github.com/ChrisThoma/devicehubctl
 
 import ApplicationServices
 import Foundation
+import ImageIO
+import XPC
 
 func attr(_ e: AXUIElement, _ name: String) -> CFTypeRef? {
   var v: CFTypeRef?
@@ -264,14 +269,25 @@ func screenElements(_ w: AXUIElement, _ udid: String) -> [AXUIElement] {
   return waitFor(10, nonEmpty) ?? []
 }
 
-func tap(_ w: AXUIElement, _ udid: String, _ target: String) {
-  let matches = { (e: AXUIElement) in
-    label(e).caseInsensitiveCompare(target) == .orderedSame || str(e, "AXIdentifier") == target
-  }
-  guard let e = screenElements(w, udid).first(where: matches) ?? waitFor(5, { screenElements(w).first(where: matches) }) else {
+// An element by its label (case-insensitive) or identifier.
+func named(_ target: String) -> (AXUIElement) -> Bool {
+  { label($0).caseInsensitiveCompare(target) == .orderedSame || str($0, "AXIdentifier") == target }
+}
+
+func onScreen(_ w: AXUIElement, _ udid: String, _ target: String) -> AXUIElement? {
+  screenElements(w, udid).first(where: named(target)) ?? waitFor(5, { screenElements(w).first(where: named(target)) })
+}
+
+func onScreenOrFail(_ w: AXUIElement, _ udid: String, _ target: String) -> AXUIElement {
+  guard let e = onScreen(w, udid, target) else {
     let have = screenElements(w).map(label).filter { !$0.isEmpty }.joined(separator: ", ")
     fail("Nothing on screen called \"\(target)\". On screen: \(have)")
   }
+  return e
+}
+
+func tap(_ w: AXUIElement, _ udid: String, _ target: String) {
+  let e = onScreenOrFail(w, udid, target)
   let err = AXUIElementPerformAction(e, "AXPress" as CFString)
   // A tap that opens an app or a screen often removes the element before
   // DeviceHub can confirm the press, which reports "cannot complete".
@@ -282,7 +298,280 @@ func tap(_ w: AXUIElement, _ udid: String, _ target: String) {
   guard err == .success else { fail("Tapping \"\(target)\" failed (AXError \(err.rawValue)).") }
 }
 
-let version = "0.2.0"
+// MARK: Touches
+
+// An accessibility press can't long-press or drag. Real touches go to dtuhidd,
+// the digitizer service inside the simulator, over the same XPC route idb
+// uses: CoreSimulator looks up the service's Mach port and two private
+// libxpc functions turn it into a host-to-simulator connection. Unlike idb,
+// this reaches the iPhone Duo's inner display. SimulatorKit's older
+// IndigoHID mouse-event path is avoided on purpose: one of its messages
+// crashed backboardd.
+
+let digitizerService = "com.apple.coredevice.feature.remote.hid.digitizer"
+
+// A point as fractions (0...1) of a display in its native orientation.
+typealias Point = (x: Double, y: Double)
+
+// The CoreSimulator methods used, called on objects from the private framework.
+@objc protocol CoreSimulatorCalls {
+  @objc(sharedServiceContextForDeveloperDir:error:) func sharedServiceContext(_ dir: String, _ error: NSErrorPointer) -> AnyObject?
+  @objc(defaultDeviceSetWithError:) func defaultDeviceSet(_ error: NSErrorPointer) -> AnyObject?
+  var devicesByUDID: NSDictionary { get }
+  @objc(lookup:error:) func lookup(_ service: String, _ error: NSErrorPointer) -> mach_port_t
+}
+
+func output(_ tool: String, _ arguments: [String]) -> (status: Int32, text: String) {
+  let p = Process()
+  p.executableURL = URL(fileURLWithPath: tool)
+  p.arguments = arguments
+  let out = Pipe()
+  p.standardOutput = out
+  p.standardError = out
+  try! p.run()
+  let data = out.fileHandleForReading.readDataToEndOfFile()
+  p.waitUntilExit()
+  return (p.terminationStatus, String(data: data, encoding: .utf8) ?? "")
+}
+
+func digitizerConnection(_ udid: String) -> xpc_connection_t {
+  typealias EndpointFromPort = @convention(c) (mach_port_t, UInt64, UInt64) -> Unmanaged<AnyObject>?
+  typealias EnableSim2Host = @convention(c) (xpc_connection_t) -> Void
+  guard dlopen("/Library/Developer/PrivateFrameworks/CoreSimulator.framework/CoreSimulator", RTLD_NOW) != nil,
+        let contextClass = NSClassFromString("SimServiceContext"),
+        let endpointSymbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "xpc_endpoint_create_mach_port_4sim"),
+        let sim2hostSymbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "xpc_connection_enable_sim2host_4sim") else {
+    fail("Couldn't load CoreSimulator's touch support.")
+  }
+  let selected = output("/usr/bin/xcode-select", ["-p"])
+  let developerDir = selected.status == 0 ? selected.text.trimmingCharacters(in: .whitespacesAndNewlines) : "/Applications/Xcode.app/Contents/Developer"
+  var error: NSError?
+  let calls = { (o: AnyObject) in unsafeBitCast(o, to: CoreSimulatorCalls.self) }
+  guard let context = calls(contextClass).sharedServiceContext(developerDir, &error),
+        let set = calls(context).defaultDeviceSet(&error),
+        let uuid = NSUUID(uuidString: udid),
+        let device = calls(set).devicesByUDID[uuid] as AnyObject? else {
+    fail("CoreSimulator doesn't know \(udid).\(error.map { " \($0.localizedDescription)" } ?? "")")
+  }
+  let port = calls(device).lookup(digitizerService, &error)
+  guard port != MACH_PORT_NULL else {
+    fail("The simulator's touch service isn't running.\(error.map { " \($0.localizedDescription)" } ?? "")")
+  }
+  let endpointFromPort = unsafeBitCast(endpointSymbol, to: EndpointFromPort.self)
+  guard let endpoint = endpointFromPort(port, 0, 0)?.takeRetainedValue() as? xpc_endpoint_t else {
+    fail("Couldn't connect to the simulator's touch service.")
+  }
+  let connection = xpc_connection_create_from_endpoint(endpoint)
+  // Without this the service sees the connection but never a message.
+  unsafeBitCast(sim2hostSymbol, to: EnableSim2Host.self)(connection)
+  xpc_connection_set_event_handler(connection) { _ in }
+  xpc_connection_resume(connection)
+  return connection
+}
+
+func message(_ type: String, _ payload: xpc_object_t, barrier: Bool) -> xpc_object_t {
+  let m = xpc_dictionary_create(nil, nil, 0)
+  xpc_dictionary_set_string(m, "messageType", type)
+  xpc_dictionary_set_bool(m, "isBarrier", barrier)
+  xpc_dictionary_set_string(m, "featureIdentifier", digitizerService)
+  xpc_dictionary_set_value(m, "payload", payload)
+  return m
+}
+
+// A no-op key event sent as a barrier. dtuhidd answers it only once
+// everything before it is handled.
+func barrier(_ c: xpc_connection_t) -> Bool {
+  let p = xpc_dictionary_create(nil, nil, 0)
+  xpc_dictionary_set_uint64(p, "usageCode", 0)
+  xpc_dictionary_set_uint64(p, "state", 2)
+  let reply = xpc_connection_send_message_with_reply_sync(c, message("IndigoKeyboardButtonEvent", p, barrier: true))
+  return xpc_get_type(reply) != XPC_TYPE_ERROR
+}
+
+enum Phase: UInt64 { case start = 0, move = 1, end = 2 }
+
+// Opens the connection, runs the gesture, and waits for dtuhidd to finish it.
+// dtuhidd opens its own services on the first message and drops events that
+// arrive meanwhile, so it gets a barrier and a moment before the first touch.
+func touches(_ udid: String, display: UInt64, _ gesture: ((Phase, Point) -> Void) -> Void) {
+  let c = digitizerConnection(udid)
+  guard barrier(c) else { fail("The simulator's touch service didn't answer.") }
+  usleep(300_000)
+  gesture { phase, point in
+    let p = xpc_dictionary_create(nil, nil, 0)
+    let pt = xpc_dictionary_create(nil, nil, 0)
+    xpc_dictionary_set_double(pt, "x", min(max(point.x, 0), 1))
+    xpc_dictionary_set_double(pt, "y", min(max(point.y, 0), 1))
+    xpc_dictionary_set_value(p, "pointOne", pt)
+    xpc_dictionary_set_uint64(p, "eventType", phase.rawValue)
+    xpc_dictionary_set_uint64(p, "edge", 0)
+    xpc_dictionary_set_uint64(p, "target", display)
+    xpc_connection_send_message(c, message("IndigoDigitizerEvent", p, barrier: false))
+    let sent = DispatchSemaphore(value: 0)
+    xpc_connection_send_barrier(c) { sent.signal() }
+    sent.wait()
+  }
+  if !barrier(c) { FileHandle.standardError.write("The touch service didn't confirm the last touch.\n".data(using: .utf8)!) }
+  xpc_connection_cancel(c)
+}
+
+func hold(_ udid: String, display: UInt64, _ at: Point, seconds: Double) {
+  touches(udid, display: display) { send in
+    send(.start, at)
+    usleep(useconds_t(seconds * 1_000_000))
+    send(.end, at)
+  }
+}
+
+// About 60 moves a second, which scrolls lists the way a finger does.
+func drag(_ udid: String, display: UInt64, from a: Point, to b: Point, seconds: Double) {
+  touches(udid, display: display) { send in
+    let steps = max(2, Int(seconds / 0.016))
+    send(.start, a)
+    for i in 1...steps {
+      usleep(useconds_t(seconds / Double(steps) * 1_000_000))
+      let t = Double(i) / Double(steps)
+      send(.move, (a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t))
+    }
+    send(.end, b)
+  }
+}
+
+// MARK: Which display
+
+// dtuhidd's digitizer targets. A Duo's outer display is the main touchscreen;
+// its inner display is target 3. Other devices have only the main one.
+enum Display { case outer, inner }
+func digitizerTarget(_ d: Display) -> UInt64 { d == .inner ? 3 : 0 }
+
+func isDuo(_ udid: String) -> Bool {
+  let d = simctlDevices().first { ($0["udid"] as? String) == udid }
+  return (d?["deviceTypeIdentifier"] as? String) == "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"
+}
+
+// True when a simctl screenshot of that display is all black, which is how
+// the display that isn't live captures.
+func displayIsBlack(_ udid: String, _ number: Int) -> Bool? {
+  let file = (NSTemporaryDirectory() as NSString).appendingPathComponent("devicehubctl-\(getpid())-\(number).png")
+  defer { try? FileManager.default.removeItem(atPath: file) }
+  guard output("/usr/bin/xcrun", ["simctl", "io", udid, "screenshot", "--display=\(number)", file]).status == 0,
+        let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: file) as CFURL, nil),
+        let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+  let (width, height) = (image.width, image.height)
+  var pixels = [UInt8](repeating: 0, count: width * height)
+  let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
+    guard let ctx = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
+                              bytesPerRow: width, space: CGColorSpaceCreateDeviceGray(),
+                              bitmapInfo: CGImageAlphaInfo.none.rawValue) else { return false }
+    ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    return true
+  }
+  guard drawn else { return nil }
+  return !pixels.contains { $0 > 8 }
+}
+
+// DeviceHub's pose buttons don't say which pose is current, so a Duo's live
+// display is found from screenshots: the one that isn't live is black.
+func liveDisplay(_ udid: String, override: Display?) -> Display {
+  if let override { return override }
+  guard isDuo(udid) else { return .outer }
+  let outerBlack = displayIsBlack(udid, 1), innerBlack = displayIsBlack(udid, 3)
+  switch (outerBlack, innerBlack) {
+  case (true, false): return .inner
+  case (false, true): return .outer
+  default: fail("Can't tell which of the Duo's displays is live. Pass --display outer or --display inner.")
+  }
+}
+
+// simctl saves the inner display's screenshots in landscape, turned a quarter
+// from its native portrait. The outer display and other devices match.
+func native(_ p: Point, on d: Display) -> Point {
+  d == .inner ? (p.y, 1 - p.x) : p
+}
+
+func frame(_ e: AXUIElement) -> CGRect? {
+  guard let p = attr(e, "AXPosition"), let s = attr(e, "AXSize") else { return nil }
+  var origin = CGPoint.zero, size = CGSize.zero
+  guard AXValueGetValue(p as! AXValue, .cgPoint, &origin), AXValueGetValue(s as! AXValue, .cgSize, &size) else { return nil }
+  return CGRect(origin: origin, size: size)
+}
+
+// An element's centre as fractions of the screen tree's frame. DeviceHub lays
+// that tree out in the display's native orientation, the same space dtuhidd
+// takes, so no turning is needed.
+func centre(_ w: AXUIElement, _ e: AXUIElement) -> Point {
+  guard let root = screen(w), let r = frame(root), r.width > 0, r.height > 0, let f = frame(e) else {
+    fail("DeviceHub didn't give a frame for \"\(label(e))\".")
+  }
+  return (Double((f.midX - r.minX) / r.width), Double((f.midY - r.minY) / r.height))
+}
+
+func longPress(_ w: AXUIElement, _ udid: String, _ target: String, seconds: Double, display: Display?) {
+  let e = onScreenOrFail(w, udid, target)
+  hold(udid, display: digitizerTarget(liveDisplay(udid, override: display)), centre(w, e), seconds: seconds)
+}
+
+let splitItem = "com.apple.springboardhome.application-shortcut-item.open-in-split"
+
+// The Home Screen's page dots, which the tree lists as a slider valued
+// "Page 2 of 3". Its increment and decrement actions turn the page; a swipe
+// sent as touches doesn't.
+func pageDots(_ w: AXUIElement) -> (dots: AXUIElement, page: Int, of: Int)? {
+  guard let dots = screenElements(w).first(where: { value($0).hasPrefix("Page ") }) else { return nil }
+  let n = value(dots).split(separator: " ").compactMap { Int($0) }
+  return n.count == 2 ? (dots, n[0], n[1]) : nil
+}
+
+func turnPage(_ w: AXUIElement, forward: Bool) {
+  guard let before = pageDots(w) else { return }
+  AXUIElementPerformAction(before.dots, (forward ? "AXIncrement" : "AXDecrement") as CFString)
+  _ = waitFor(3, { pageDots(w).flatMap { $0.page != before.page ? true : nil } })
+}
+
+// The icon on the current Home Screen page, or else on the first page that
+// has it, turning back to page one first.
+func homeIcon(_ w: AXUIElement, _ udid: String, _ icon: String) -> AXUIElement? {
+  if let e = screenElements(w, udid).first(where: named(icon)) { return e }
+  guard let start = pageDots(w) else { return nil }
+  for _ in 1..<max(start.page, 1) { turnPage(w, forward: false) }
+  for page in 1...start.of {
+    if page > 1 { turnPage(w, forward: true) }
+    if let e = waitFor(1, { screenElements(w).first(where: named(icon)) }) { return e }
+  }
+  return nil
+}
+
+// Long-press a Home Screen icon and choose Open in Split View. The other half
+// shows a Home Screen that DeviceHub leaves out of the screen tree, but an app
+// launched then opens there.
+func split(_ w: AXUIElement, _ udid: String, _ icon: String, bundleID: String?, display: Display?) {
+  guard let e = homeIcon(w, udid, icon) else {
+    let pages = pageDots(w).map { " on any of the \($0.of) Home Screen pages" } ?? " on screen"
+    fail("""
+    No "\(icon)" icon\(pages).
+    Press Home first if an app is open. An app that's only in the App Library can't
+    be split this way: split with an icon that is on the Home Screen and pass the
+    other app's bundle id.
+    """)
+  }
+  hold(udid, display: digitizerTarget(liveDisplay(udid, override: display)), centre(w, e), seconds: 1.2)
+  guard let item = waitFor(5, { screenElements(w).first { str($0, "AXIdentifier") == splitItem } }) else {
+    let offered = screenElements(w).filter { str($0, "AXIdentifier").hasPrefix("com.apple.springboardhome.application-shortcut-item") }
+    let have = offered.map(label).joined(separator: ", ")
+    if !offered.isEmpty { press(w, "Home") }
+    fail(offered.isEmpty
+      ? "Long-pressing \"\(icon)\" didn't open its menu."
+      : "\"\(icon)\" has no Open in Split View. Its menu offered: \(have)")
+  }
+  let err = AXUIElementPerformAction(item, "AXPress" as CFString)
+  guard err == .success || err == .cannotComplete else { fail("Choosing Open in Split View failed (AXError \(err.rawValue)).") }
+  guard let bundleID else { return }
+  sleep(2)
+  let launched = output("/usr/bin/xcrun", ["simctl", "launch", udid, bundleID])
+  guard launched.status == 0 else { fail("Split View opened, but launching \(bundleID) failed: \(launched.text)") }
+}
+
+let version = "0.3.0"
 
 let usage = """
 usage: devicehubctl <udid> controls            list the device's buttons
@@ -291,13 +580,30 @@ usage: devicehubctl <udid> controls            list the device's buttons
        devicehubctl <udid> rotate [times]      rotate right, 90 degrees each
        devicehubctl <udid> tree                what's on the device's screen
        devicehubctl <udid> tap <label|id>      tap something on the screen
+       devicehubctl <udid> longpress <label|id> [seconds]
+                                               touch and hold it (1.2 s)
+       devicehubctl <udid> split <icon> [<bundle id>]
+                                               open a Home Screen app in Split View,
+                                               and launch another app beside it
+       devicehubctl <udid> touch <x> <y> [seconds]
+       devicehubctl <udid> drag <x1> <y1> <x2> <y2> [seconds]
+                                               touch or drag at fractions (0-1) of
+                                               the display's simctl screenshot
 
 <udid> may be "booted" when exactly one simulator is booted.
+On an iPhone Duo, touches go to the live display. --display outer|inner
+picks one instead.
 """
 
-let args = Array(CommandLine.arguments.dropFirst())
+var args = Array(CommandLine.arguments.dropFirst())
 if args.first == "--version" { print(version); exit(0) }
 if args.first == "-h" || args.first == "--help" { print(usage); exit(0) }
+var displayOverride: Display?
+if let i = args.firstIndex(of: "--display") {
+  guard i + 1 < args.count, let d = ["outer": Display.outer, "inner": .inner][args[i + 1]] else { fail(usage) }
+  displayOverride = d
+  args.removeSubrange(i...(i + 1))
+}
 guard args.count >= 2 else { fail(usage) }
 let udid = args[0]
 
@@ -305,6 +611,32 @@ let udid = args[0]
 // opening windows at once could each pick up the other's new window.
 let lockFD = open((NSTemporaryDirectory() as NSString).appendingPathComponent("devicehubctl.lock"), O_CREAT | O_RDWR, 0o644)
 if lockFD >= 0 { flock(lockFD, LOCK_EX) }
+
+// touch and drag don't need DeviceHub's window, only a booted simulator.
+func numbers(_ from: ArraySlice<String>) -> [Double] {
+  let n = from.compactMap(Double.init)
+  guard n.count == from.count else { fail(usage) }
+  return n
+}
+if args[1] == "touch" || args[1] == "drag" {
+  let device = simDevice(udid)
+  guard device.state == "Booted" else { fail("\(device.name) is \(device.state). Boot it first: xcrun simctl boot \(device.udid)") }
+  let n = numbers(args[2...])
+  let points = args[1] == "touch" ? 2 : 4
+  guard n.count == points || n.count == points + 1 else { fail(usage) }
+  guard n.prefix(points).allSatisfy({ (0...1).contains($0) }) else {
+    fail("x and y are fractions of the screenshot, from 0 to 1.")
+  }
+  let d = liveDisplay(device.udid, override: displayOverride)
+  if points == 2 {
+    hold(device.udid, display: digitizerTarget(d), native((n[0], n[1]), on: d), seconds: n.count > 2 ? n[2] : 0.1)
+  } else {
+    drag(device.udid, display: digitizerTarget(d), from: native((n[0], n[1]), on: d), to: native((n[2], n[3]), on: d),
+         seconds: n.count > 4 ? n[4] : 0.5)
+  }
+  exit(0)
+}
+
 let app = deviceHub()
 let w = window(for: udid, app)
 let target = selectedUDID(w) ?? simDevice(udid).udid
@@ -336,6 +668,12 @@ case "tree":
   }
 case "tap" where args.count == 3:
   tap(w, target, args[2])
+case "longpress" where args.count == 3 || args.count == 4:
+  let seconds = args.count == 4 ? Double(args[3]) ?? -1 : 1.2
+  guard seconds > 0 else { fail(usage) }
+  longPress(w, target, args[2], seconds: seconds, display: displayOverride)
+case "split" where args.count == 3 || args.count == 4:
+  split(w, target, args[2], bundleID: args.count == 4 ? args[3] : nil, display: displayOverride)
 default:
   fail(usage)
 }

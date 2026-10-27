@@ -2,14 +2,15 @@
 
 ![devicehubctl: fold, rotate and tap iOS simulators from the terminal](https://individuation.dev/projects/devicehubctl/share-card.png)
 
-Fold, unfold and rotate iOS simulators from the command line, and read or tap
-what's on their screen, through Xcode 27's DeviceHub.
+Fold, unfold and rotate iOS simulators from the command line, and read, tap,
+long-press or drag what's on their screen, through Xcode 27's DeviceHub.
 
 ```sh
 devicehubctl <udid> pose open        # iPhone Duo: closed, partial or open
 devicehubctl <udid> rotate           # 90° right
 devicehubctl <udid> tree             # what's on the device's screen
 devicehubctl <udid> tap "Continue"   # tap it
+devicehubctl <udid> split Settings   # Split View on the Duo
 ```
 
 More about it:
@@ -60,6 +61,10 @@ cp .build/release/devicehubctl /usr/local/bin/
 | `devicehubctl <udid> press "<label>"` | Press one of them, e.g. `Home` |
 | `devicehubctl <udid> tree` | List what's on the screen: role, label, value, identifier |
 | `devicehubctl <udid> tap "<label or id>"` | Tap something `tree` listed |
+| `devicehubctl <udid> longpress "<label or id>" [seconds]` | Touch and hold it, 1.2 seconds unless you say otherwise |
+| `devicehubctl <udid> split "<icon>" [<bundle id>]` | Open a Home Screen app in Split View, and launch another app beside it |
+| `devicehubctl <udid> touch <x> <y> [seconds]` | Touch a point, 0.1 seconds unless you say otherwise |
+| `devicehubctl <udid> drag <x1> <y1> <x2> <y2> [seconds]` | Drag from one point to another, 0.5 seconds unless you say otherwise |
 
 `<udid>` comes from `xcrun simctl list devices`. You can pass `booted` when exactly
 one simulator is booted. With more than one, it refuses rather than guess.
@@ -101,15 +106,63 @@ xcrun simctl io <udid> screenshot --display=3 inner.png   # live when partially 
 The display that isn't live captures black. Give a pose change about three seconds
 before you screenshot.
 
+### Touches
+
+`tap` presses an element through accessibility, which isn't a finger. `longpress`,
+`split`, `touch` and `drag` send real touches to the simulator's digitizer service,
+the way idb does, except they also reach the Duo's inner display.
+
+`touch` and `drag` take points as fractions, 0 to 1, of the screenshot
+`xcrun simctl io <udid> screenshot --display=N` saves, measured from its top left
+corner. That's the screenshot as saved, without turning it, so the Duo's inner
+display counts in its landscape screenshot even though the display is portrait
+underneath. `touch 0.5 0.5` is always the middle. These two don't need
+DeviceHub's window or Accessibility access, only a booted simulator.
+
+On a Duo, touches go to whichever display is live, found by screenshotting both
+and taking the one that isn't black. `--display outer` or `--display inner`
+picks one instead.
+
+Drags are a straight line at about 60 moves a second. They scroll lists and move
+the Split View divider. They don't turn Home Screen pages; `split` turns pages
+through accessibility instead.
+
+### Split View on the iPhone Duo
+
+```sh
+devicehubctl <udid> pose open
+devicehubctl <udid> press Home
+devicehubctl <udid> split Settings dev.individuation.chiptune
+```
+
+`split` long-presses the icon, looking through the Home Screen's pages for it,
+and chooses Open in Split View. That app takes the left half. The right half
+shows a Home Screen that DeviceHub leaves out of the screen tree, so `split`
+launches the bundle id you pass with `simctl launch`, which opens it there. If
+the icon's menu has no Open in Split View, it says what the menu offered.
+
+The divider sits at x 0.5 of the inner display's screenshot. Dragging it moves
+the panes while the finger is down, but on release they settle back at half,
+from anywhere between about 0.24 and 0.76. Released at 0.18 or less, or 0.8 or
+more, Split View closes and the app on the larger side fills the screen. An app
+can still notice the resize: twice, Settings came back from a drag showing
+General instead of its main list.
+
 ## Limits
 
 - **No typing.** Setting a text field's value through accessibility shows the
   text in the field, but the app never receives it. Use a launch argument, a
   fixture, or the app's own suggestion buttons.
-- **No gestures.** `tap` performs the element's accessibility press. Drags, long
-  presses and swipes the app handles itself need another route.
-- **No coordinates.** `tree` lists elements by label and identifier only. Its
-  frames come from DeviceHub's zoomed window, not the device's points.
+- **One finger.** `touch`, `drag` and `longpress` send a single touch. There's
+  no pinch or two-finger gesture.
+- **Unrotated only.** The screenshot-to-touch mapping is checked on devices that
+  haven't been turned with `rotate`. After a rotation, check where a `touch` lands
+  before relying on it.
+- **No Home Screen swipes.** A drag across the Home Screen doesn't turn the
+  page. `split` uses the page dots' accessibility actions instead.
+- **No coordinates in `tree`.** It lists elements by label and identifier only.
+  Its frames come from DeviceHub's zoomed window, not the device's points. Take
+  coordinates for `touch` from a screenshot.
 - **Button labels can change.** It presses DeviceHub's buttons by their labels
   (Closed, Partially Open, Open, Rotate Right). If an Xcode update renames them,
   `controls` shows the new names.

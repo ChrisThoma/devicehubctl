@@ -2,11 +2,12 @@
 name: devicehubctl
 description: >-
   Fold and unfold an iPhone Duo simulator (closed, partially open, open), rotate
-  any iOS simulator, and read or tap the simulated screen through Xcode 27's
-  DeviceHub with the `devicehubctl` command-line tool. Use when a task needs a Duo
-  pose, the Duo's inner display, a rotation or landscape coverage, or when idb or a
-  simulator MCP server's tree and tap tools fail on an iPhone Duo. Also use in bug
-  hunts and UI checks that target a Duo.
+  any iOS simulator, read the simulated screen, and tap, long-press or drag on it
+  through Xcode 27's DeviceHub with the `devicehubctl` command-line tool. Use when
+  a task needs a Duo pose, Split View on a Duo, the Duo's inner display, a rotation
+  or landscape coverage, or when idb or a simulator MCP server's tree, tap and
+  swipe tools fail on an iPhone Duo. Also use in bug hunts and UI checks that
+  target a Duo.
 ---
 
 # devicehubctl
@@ -29,6 +30,10 @@ devicehubctl <udid> controls                   # the bar under the device
 devicehubctl <udid> press "<label>"            # any of those, e.g. Home
 devicehubctl <udid> tree                       # what's on the device's screen
 devicehubctl <udid> tap "<label or id>"        # tap something listed by tree
+devicehubctl <udid> longpress "<label or id>" [seconds]   # touch and hold, 1.2 s
+devicehubctl <udid> split "<icon>" [<bundle id>]          # Duo Split View
+devicehubctl <udid> touch <x> <y> [seconds]               # real touch at a point
+devicehubctl <udid> drag <x1> <y1> <x2> <y2> [seconds]    # real drag, 0.5 s
 ```
 
 Pass an explicit UDID from `xcrun simctl list devices`. `booted` works only when
@@ -59,8 +64,41 @@ you hand simulator work to a subagent, say so alongside the UDID.
 - It can't type. Setting a field's value through accessibility shows the text
   without the app receiving it. Pick a suggestion button, use a launch argument or
   fixture, or report text entry as blocked.
-- An accessibility press isn't a finger. A gesture the app handles itself (drag,
-  long press, swipe) needs another route.
+- An accessibility press isn't a finger. For a gesture the app handles itself,
+  use the touch commands below.
+
+## Touches: long press, touch, drag
+
+`longpress`, `split`, `touch` and `drag` send real touches to the simulator's
+digitizer service, on the Duo's inner display too.
+
+- `longpress` finds an element the way `tap` does and holds its centre.
+- `touch` and `drag` take x and y as fractions (0 to 1) of the screenshot
+  `xcrun simctl io <udid> screenshot --display=N` saves, from its top left, as
+  saved and not turned. The Duo's inner display counts in its landscape
+  screenshot. Read the point off a screenshot, then touch it.
+- On a Duo, touches go to the live display, found by which display's screenshot
+  isn't black. `--display outer|inner` overrides that.
+- Drags scroll lists and move the Split View divider. A drag across the Home
+  Screen does not turn the page.
+- The mapping is only checked unrotated. After `rotate`, screenshot to confirm
+  where a touch lands.
+- Single finger only. No pinch.
+
+## Split View on a Duo
+
+```sh
+devicehubctl <udid> pose open
+devicehubctl <udid> press Home
+devicehubctl <udid> split Settings <bundle id of the other app>
+```
+
+The icon's app takes the left half and the bundle id is launched into the right
+half. `split` turns Home Screen pages to find the icon. If the menu has no "Open
+in Split View", it lists what the menu offered. The divider (x 0.5 in the inner
+screenshot) settles back at half after a drag released between about 0.24 and
+0.76; released at 0.18 or less, or 0.8 or more, Split View closes. Run `split`
+again to get it back.
 
 ## Shared machines
 

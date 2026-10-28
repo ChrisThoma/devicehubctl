@@ -3,13 +3,14 @@
 ![devicehubctl: fold, rotate and tap iOS simulators from the terminal](https://individuation.dev/projects/devicehubctl/share-card.png)
 
 Fold, unfold and rotate iOS simulators from the command line, and read, tap,
-long-press or drag what's on their screen, through Xcode 27's DeviceHub.
+long-press, drag or type on what's on their screen, through Xcode 27's DeviceHub.
 
 ```sh
 devicehubctl <udid> pose open        # iPhone Duo: closed, partial or open
 devicehubctl <udid> rotate           # 90° right
 devicehubctl <udid> tree             # what's on the device's screen
 devicehubctl <udid> tap "Continue"   # tap it
+devicehubctl <udid> type "Hello"     # type into the focused field
 devicehubctl <udid> split Settings   # Split View on the Duo
 ```
 
@@ -132,9 +133,11 @@ upright by hand, or keep rotating with `devicehubctl`.
 
 `longpress` and `split` find an element's place from the screen tree. DeviceHub
 reports that tree's frame at the inner display's portrait size whichever display
-is live, so `devicehubctl` measures the live display from its screenshot at the
-same scale. Before 0.4.0 it didn't, and long presses on the outer display landed
-up and to the left of their target.
+is live, and apps lay their elements out the way the screenshot shows them, so
+`devicehubctl` measures the live display from its screenshot at the same scale.
+The Home Screen is the exception: it's laid out in the display's native frame,
+and is read that way. Before 0.4.0, long presses in apps landed in the wrong
+place, up and to the left on the outer display.
 
 On a Duo, touches go to whichever display is live, found by screenshotting both
 and taking the one that isn't black. `--display outer` or `--display inner`

@@ -30,6 +30,7 @@ devicehubctl <udid> controls                   # the bar under the device
 devicehubctl <udid> press "<label>"            # any of those, e.g. Home
 devicehubctl <udid> tree                       # what's on the device's screen
 devicehubctl <udid> tap "<label or id>"        # tap something listed by tree
+devicehubctl <udid> type "<text>"              # type with the on-screen keyboard
 devicehubctl <udid> longpress "<label or id>" [seconds]   # touch and hold, 1.2 s
 devicehubctl <udid> split "<icon>" [<bundle id>]          # Duo Split View
 devicehubctl <udid> touch <x> <y> [seconds]               # real touch at a point
@@ -47,8 +48,11 @@ captured.
 - `--display=1`: the outer screen, live when closed
 - `--display=3`: the inner screen, live when partially open or open
 
-The display that isn't live captures black. After a pose change, wait about 3
-seconds before screenshotting.
+The display that isn't live captures black. `pose` returns only once the fold
+has landed (3 to 5 s) and prints how long it took, so a screenshot right after
+it shows the new pose. A pose change is never instant: to fold during something
+short (an export, an animation), make that thing last 10 s or more, or the fold
+lands after it has finished.
 
 ## Reading and tapping the screen
 
@@ -58,12 +62,21 @@ you hand simulator work to a subagent, say so alongside the UDID.
 
 - `tree` prints each element's role, label, value and accessibility identifier,
   in screen order. It has no coordinates. Use labels, or identifiers where the app
-  sets them.
+  sets them. A slider or adjustable stepper's value is what VoiceOver speaks
+  (`3 times`).
+- Navigation bar buttons (Edit, Done, Close, Cancel in a sheet or popover) are
+  never in `tree`; DeviceHub leaves them out. Their absence is not an app
+  accessibility bug. Touch them at their place in a screenshot.
 - `tap` matches a label exactly (case-insensitive) or an identifier, and then
-  presses that element. If nothing matches it lists what's on screen.
-- It can't type. Setting a field's value through accessibility shows the text
-  without the app receiving it. Pick a suggestion button, use a launch argument or
-  fixture, or report text entry as blocked.
+  presses that element. If nothing matches it lists what's on screen. If several
+  match and only one is a control, it presses that one; otherwise it lists them
+  as `Label#1`, `Label#2`, and you pick with `tap "Label#2"`.
+- `type "<text>"` types into the focused field by pressing the on-screen
+  keyboard's keys, about one a second. Focus the field first (`touch` it, or
+  `tap` it and check the keyboard came up). Text goes in at the cursor, which a
+  touch puts where it lands. iOS autocorrect still applies, so
+  read the field's value with `tree` afterwards. Hardware-only keys (arrows,
+  Escape, Command shortcuts) can't be sent; report those journeys as blocked.
 - An accessibility press isn't a finger. For a gesture the app handles itself,
   use the touch commands below.
 
@@ -76,13 +89,14 @@ digitizer service, on the Duo's inner display too.
 - `touch` and `drag` take x and y as fractions (0 to 1) of the screenshot
   `xcrun simctl io <udid> screenshot --display=N` saves, from its top left, as
   saved and not turned. The Duo's inner display counts in its landscape
-  screenshot. Read the point off a screenshot, then touch it.
+  screenshot, and a rotated device in its rotated one. Read the point off a
+  screenshot, then touch it.
 - On a Duo, touches go to the live display, found by which display's screenshot
   isn't black. `--display outer|inner` overrides that.
 - Drags scroll lists and move the Split View divider. A drag across the Home
   Screen does not turn the page.
-- The mapping is only checked unrotated. After `rotate`, screenshot to confirm
-  where a touch lands.
+- Touches follow rotations made with `rotate`. One made by hand in DeviceHub
+  isn't seen, so rotate only with `devicehubctl`. Upside down is unchecked.
 - Single finger only. No pinch.
 
 ## Split View on a Duo
@@ -94,7 +108,9 @@ devicehubctl <udid> split Settings <bundle id of the other app>
 ```
 
 The icon's app takes the left half and the bundle id is launched into the right
-half. `split` turns Home Screen pages to find the icon. If the menu has no "Open
+half. `split` turns Home Screen pages to find the icon, holds it until its menu
+shows, and presses Home if no menu comes, so the Home Screen isn't left in
+jiggle mode. If the menu has no "Open
 in Split View", it lists what the menu offered. The divider (x 0.5 in the inner
 screenshot) settles back at half after a drag released between about 0.24 and
 0.76; released at 0.18 or less, or 0.8 or more, Split View closes. Run `split`
@@ -112,7 +128,8 @@ again to get it back.
   windows from accessibility and `devicehubctl` says so. Tell the user instead of
   retrying in a loop.
 - Several simulators can be driven at once, from several agents. Windows are
-  matched by UDID, and concurrent runs wait for each other through a lock file.
+  matched by UDID. Runs wait for each other only while one opens or switches a
+  window.
 - Never close a DeviceHub window or quit DeviceHub: either shuts down the
   simulators it shows, including other people's.
 - Shut down what you booted when you're done (`xcrun simctl shutdown <udid>`).

@@ -162,9 +162,26 @@ func select(_ w: AXUIElement, _ udid: String) -> Bool {
   return waitFor(10, { selectedUDID(w) == udid ? true : nil }) != nil
 }
 
+// One window change at a time, across every session on this Mac. Two runs
+// opening windows at once could each pick up the other's new window, and a
+// run reusing an idle window could take one that reattach() has switched to a
+// shut-down stand-in for a moment. Touches and reads don't take the lock, so
+// one agent's long press doesn't hold up another agent's fold.
+func withWindowLock<T>(_ body: () -> T) -> T {
+  let fd = open((NSTemporaryDirectory() as NSString).appendingPathComponent("devicehubctl.lock"), O_CREAT | O_RDWR, 0o644)
+  if fd >= 0 { flock(fd, LOCK_EX) }
+  defer { if fd >= 0 { flock(fd, LOCK_UN); close(fd) } }
+  return body()
+}
+
 // The window for this device, opening a new one when no window shows it.
 func window(for udid: String, _ app: AXUIElement) -> AXUIElement {
   let device = simDevice(udid)
+  if device.state == "Booted", let w = windowShowing(app, device) { return w }
+  return withWindowLock { openWindow(for: device, app) }
+}
+
+func openWindow(for device: (udid: String, name: String, state: String, nameIsShared: Bool), _ app: AXUIElement) -> AXUIElement {
   let (udid, name, state, _) = device
   guard state == "Booted" else { fail("\(name) is \(state). Boot it first: xcrun simctl boot \(udid)") }
   if let w = windowShowing(app, device) { return w }
@@ -226,23 +243,36 @@ func screen(_ w: AXUIElement) -> AXUIElement? {
   find(w, { str($0, "AXSubrole") == "iOSContentGroup" })
 }
 
-// Every element with something to call it by, depth first, in screen order.
-func screenElements(_ w: AXUIElement) -> [AXUIElement] {
-  guard let root = screen(w) else { return [] }
+// Every element with something to call it by under one element, depth first.
+func named(under e: AXUIElement) -> [AXUIElement] {
   var found: [AXUIElement] = []
   func walk(_ e: AXUIElement) {
-    if !label(e).isEmpty || !value(e).isEmpty { found.append(e) }
+    if !label(e).isEmpty || !value(e).isEmpty || !str(e, "AXIdentifier").isEmpty { found.append(e) }
     for k in children(e) { walk(k) }
   }
-  for k in children(root) { walk(k) }
+  walk(e)
   return found
+}
+
+// Every element with something to call it by, depth first, in screen order.
+// An identifier alone counts: an unlabelled group with id=Arrangement says
+// which sheet is up. Navigation bar buttons (Edit, Done, Close, Cancel) never
+// reach DeviceHub's tree at all; touch them by their place in a screenshot.
+func screenElements(_ w: AXUIElement) -> [AXUIElement] {
+  guard let root = screen(w) else { return [] }
+  return children(root).flatMap { named(under: $0) }
 }
 
 func label(_ e: AXUIElement) -> String {
   let d = str(e, "AXDescription")
   return d.isEmpty ? str(e, "AXTitle") : d
 }
+// An adjustable element (a slider, or a SwiftUI stepper given the adjustable
+// trait) reports its AXValue as a number, often nan, and what VoiceOver
+// speaks as AXValueDescription ("3 times"). Print the spoken one.
 func value(_ e: AXUIElement) -> String {
+  let spoken = str(e, "AXValueDescription")
+  if !spoken.isEmpty { return spoken }
   guard let v = attr(e, "AXValue") else { return "" }
   return (v as? String) ?? "\(v)"
 }
@@ -253,6 +283,10 @@ func value(_ e: AXUIElement) -> String {
 // brings it back. The stand-in is a shut-down simulator, so no running device
 // is shown twice.
 func reattach(_ w: AXUIElement, _ udid: String) {
+  withWindowLock { switchAway(w, udid) }
+}
+
+func switchAway(_ w: AXUIElement, _ udid: String) {
   let standIn = simctlDevices().first { ($0["state"] as? String) == "Shutdown" && ($0["udid"] as? String) != udid }
   guard let other = standIn?["udid"] as? String, select(w, other) else { return }
   sleep(2)
@@ -274,16 +308,39 @@ func named(_ target: String) -> (AXUIElement) -> Bool {
   { label($0).caseInsensitiveCompare(target) == .orderedSame || str($0, "AXIdentifier") == target }
 }
 
-func onScreen(_ w: AXUIElement, _ udid: String, _ target: String) -> AXUIElement? {
-  screenElements(w, udid).first(where: named(target)) ?? waitFor(5, { screenElements(w).first(where: named(target)) })
+func onScreen(_ w: AXUIElement, _ udid: String, _ target: String) -> [AXUIElement] {
+  let matches = screenElements(w, udid).filter(named(target))
+  return matches.isEmpty ? waitFor(5, { () -> [AXUIElement]? in
+    let m = screenElements(w).filter(named(target))
+    return m.isEmpty ? nil : m
+  }) ?? [] : matches
 }
 
+// The one element called target. With several, a single control among text
+// wins (a track header Button "Pulse 1" over the keyboard's caption "Pulse 1");
+// otherwise this lists them rather than guess, and "Label#2" picks the second.
+// Taking the first match used to long-press the wrong Songs row.
 func onScreenOrFail(_ w: AXUIElement, _ udid: String, _ target: String) -> AXUIElement {
-  guard let e = onScreen(w, udid, target) else {
+  var matches = onScreen(w, udid, target)
+  var pick: Int?
+  if matches.isEmpty, let hash = target.lastIndex(of: "#"), let n = Int(target[target.index(after: hash)...]), n > 0 {
+    pick = n
+    matches = onScreen(w, udid, String(target[..<hash]))
+  }
+  guard !matches.isEmpty else {
     let have = screenElements(w).map(label).filter { !$0.isEmpty }.joined(separator: ", ")
     fail("Nothing on screen called \"\(target)\". On screen: \(have)")
   }
-  return e
+  if let pick {
+    guard pick <= matches.count else { fail("Only \(matches.count) elements are called \"\(target.prefix(upTo: target.lastIndex(of: "#")!))\".") }
+    return matches[pick - 1]
+  }
+  if matches.count == 1 { return matches[0] }
+  let text: Set<String> = ["AXStaticText", "AXHeading", "AXGroup"]
+  let controls = matches.filter { !text.contains(str($0, "AXRole")) }
+  if controls.count == 1 { return controls[0] }
+  let list = matches.enumerated().map { "\(target)#\($0.offset + 1) (\(str($0.element, "AXRole").replacingOccurrences(of: "AX", with: "")))" }
+  fail("\(matches.count) elements are called \"\(target)\": \(list.joined(separator: ", ")). Pick one with #n.")
 }
 
 func tap(_ w: AXUIElement, _ udid: String, _ target: String) {
@@ -449,15 +506,18 @@ func isDuo(_ udid: String) -> Bool {
   return (d?["deviceTypeIdentifier"] as? String) == "com.apple.CoreSimulator.SimDeviceType.iPhone-Duo"
 }
 
-// True when a simctl screenshot of that display is all black, which is how
-// the display that isn't live captures.
-func displayIsBlack(_ udid: String, _ number: Int) -> Bool? {
+// A simctl screenshot of one display: its size in pixels, and a small grey
+// thumbnail, enough to tell black from live. Kept for the rest of the run
+// unless a fresh one is asked for, since each takes 0.4 to 1.5 s.
+var screenshots: [Int: (size: CGSize, grey: [UInt8])] = [:]
+func screenshot(_ udid: String, _ number: Int, fresh: Bool = false) -> (size: CGSize, grey: [UInt8])? {
+  if !fresh, let kept = screenshots[number] { return kept }
   let file = (NSTemporaryDirectory() as NSString).appendingPathComponent("devicehubctl-\(getpid())-\(number).png")
   defer { try? FileManager.default.removeItem(atPath: file) }
   guard output("/usr/bin/xcrun", ["simctl", "io", udid, "screenshot", "--display=\(number)", file]).status == 0,
         let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: file) as CFURL, nil),
         let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
-  let (width, height) = (image.width, image.height)
+  let (width, height) = (96, 96)
   var pixels = [UInt8](repeating: 0, count: width * height)
   let drawn = pixels.withUnsafeMutableBytes { buffer -> Bool in
     guard let ctx = CGContext(data: buffer.baseAddress, width: width, height: height, bitsPerComponent: 8,
@@ -467,7 +527,29 @@ func displayIsBlack(_ udid: String, _ number: Int) -> Bool? {
     return true
   }
   guard drawn else { return nil }
-  return !pixels.contains { $0 > 8 }
+  let shot = (size: CGSize(width: image.width, height: image.height), grey: pixels)
+  screenshots[number] = shot
+  return shot
+}
+
+func screenshotNumber(_ d: Display) -> Int { d == .inner ? 3 : 1 }
+
+// True when a simctl screenshot of that display is all black, which is how
+// the display that isn't live captures.
+func displayIsBlack(_ udid: String, _ number: Int, fresh: Bool = false) -> Bool? {
+  screenshot(udid, number, fresh: fresh).map { !$0.grey.contains { $0 > 8 } }
+}
+
+// DeviceHub takes the pose press at once but the simulator gets there later,
+// 3 to 5 s on a loaded Mac, and an agent that screenshots too soon gets the
+// old screen. So a pose returns only once the outer display has gone black
+// (opening) or lit up (closing), and the screen tree has filled in again.
+// Only the outer display is polled: its screenshots take a third as long.
+func settle(_ w: AXUIElement, _ udid: String, live want: Display, since start: Date, _ label: String) {
+  let landed = waitFor(15) { displayIsBlack(udid, 1, fresh: true).map { $0 == (want == .inner) ? true : nil } ?? nil }
+  guard landed != nil else { fail("Pressed \(label), but after 15 s the \(want) display still isn't the live one.") }
+  _ = screenElements(w, udid)
+  print("\(label): \(want) display live after \(String(format: "%.1f", Date().timeIntervalSince(start))) s")
 }
 
 // DeviceHub's pose buttons don't say which pose is current, so a Duo's live
@@ -483,10 +565,42 @@ func liveDisplay(_ udid: String, override: Display?) -> Display {
   }
 }
 
-// simctl saves the inner display's screenshots in landscape, turned a quarter
-// from its native portrait. The outer display and other devices match.
-func native(_ p: Point, on d: Display) -> Point {
-  d == .inner ? (p.y, 1 - p.x) : p
+// MARK: Screenshot points to touch points
+
+// Rotations made with `rotate`, kept per simulator so touches can follow them.
+// A rotation made by hand in DeviceHub isn't seen; the screenshot's shape
+// catches most of those (see quarterTurns).
+func turnsFile(_ udid: String) -> String {
+  (NSTemporaryDirectory() as NSString).appendingPathComponent("devicehubctl-turns-\(udid)")
+}
+func recordedTurns(_ udid: String) -> Int {
+  (try? String(contentsOfFile: turnsFile(udid), encoding: .utf8)).flatMap { Int($0) } ?? 0
+}
+func recordTurns(_ udid: String, _ turns: Int) {
+  try? String((turns % 4 + 4) % 4).write(toFile: turnsFile(udid), atomically: true, encoding: .utf8)
+}
+
+// Quarter turns between what a screenshot shows and the digitizer's native
+// frame. The inner display starts one turn off (its screenshots are
+// landscape, its digitizer portrait), and each `rotate` adds one, as long as
+// the app follows the device. When the screenshot's shape says the app didn't
+// (Chiptune stays portrait on the outer display), the app's own orientation
+// is the one that counts.
+func quarterTurns(_ udid: String, _ d: Display) -> Int {
+  let base = d == .inner ? 1 : 0
+  let turns = (base + recordedTurns(udid)) % 4
+  guard let size = screenshot(udid, screenshotNumber(d))?.size else { return turns }
+  let landscape = size.width > size.height
+  return (turns % 2 == 1) == landscape ? turns : (landscape ? 1 : 0)
+}
+
+// A point as fractions of the display's screenshot, as saved, to the
+// digitizer's frame. Checked on the outer display at 0, 1 and 3 turns and on
+// the inner display at 0 and 1.
+func touchPoint(_ p: Point, _ udid: String, on d: Display) -> Point {
+  var p = p
+  for _ in 0..<quarterTurns(udid, d) { p = (p.y, 1 - p.x) }
+  return p
 }
 
 func frame(_ e: AXUIElement) -> CGRect? {
@@ -496,19 +610,84 @@ func frame(_ e: AXUIElement) -> CGRect? {
   return CGRect(origin: origin, size: size)
 }
 
-// An element's centre as fractions of the screen tree's frame. DeviceHub lays
-// that tree out in the display's native orientation, the same space dtuhidd
-// takes, so no turning is needed.
-func centre(_ w: AXUIElement, _ e: AXUIElement) -> Point {
-  guard let root = screen(w), let r = frame(root), r.width > 0, r.height > 0, let f = frame(e) else {
+// Where to touch an element, in the digitizer's frame. The screen tree's frame
+// doesn't say where the live display is: on a Duo it is always the inner
+// display's native portrait size (626 x 890 points) whichever is live. Apps
+// lay their elements out the way the screenshot shows them, landscape on the
+// inner display and at the same scale (so a smaller box) on the outer one.
+// SpringBoard lays the Home Screen out in the display's native frame instead,
+// and turns it as a whole. So the scale comes from the inner display (or the
+// only one), the live display's box is its screenshot at that scale, and on
+// a turned display the Home Screen (found by its page dots or its search
+// button; an app's scrolled-off content rules out judging by extent) is read
+// as native.
+func touchPoint(of e: AXUIElement, _ w: AXUIElement, _ udid: String, on d: Display) -> Point {
+  guard let root = screen(w), let r = frame(root), r.width > 0, r.height > 0, let f = frame(e),
+        let live = screenshot(udid, screenshotNumber(d))?.size,
+        let full = (isDuo(udid) ? screenshot(udid, 3) : screenshot(udid, 1))?.size else {
     fail("DeviceHub didn't give a frame for \"\(label(e))\".")
   }
-  return (Double((f.midX - r.minX) / r.width), Double((f.midY - r.minY) / r.height))
+  let scale = max(r.width, r.height) / max(full.width, full.height)
+  let box = CGSize(width: live.width * scale, height: live.height * scale)
+  let (x, y) = (Double(f.midX - r.minX), Double(f.midY - r.minY))
+  if quarterTurns(udid, d) % 2 == 1 {
+    if pageDots(w) != nil || screenElements(w).contains(where: { str($0, "AXIdentifier") == "spotlight-search-button" }) {
+      return (x / Double(box.height), y / Double(box.width))
+    }
+  }
+  return touchPoint((x / Double(box.width), y / Double(box.height)), udid, on: d)
 }
 
 func longPress(_ w: AXUIElement, _ udid: String, _ target: String, seconds: Double, display: Display?) {
   let e = onScreenOrFail(w, udid, target)
-  hold(udid, display: digitizerTarget(liveDisplay(udid, override: display)), centre(w, e), seconds: seconds)
+  let d = liveDisplay(udid, override: display)
+  hold(udid, display: digitizerTarget(d), touchPoint(of: e, w, udid, on: d), seconds: seconds)
+}
+
+// Type with the on-screen keyboard, one key press at a time. Each key is a
+// button in the screen tree, labelled with what it types ("a", "A" while
+// Shift is on, "1" on the numbers layout). A character that isn't showing
+// sends Shift or a layout key first. The keyboard comes last in the tree, so
+// the last match is the key, not an app button with the same label.
+func type(_ w: AXUIElement, _ udid: String, _ text: String) {
+  let names: [Character: String] = [" ": "space", "&": "ampersand"]
+  func key(_ label: String, in all: [AXUIElement]) -> AXUIElement? {
+    all.last { str($0, "AXDescription") == label || (label != " " && str($0, "AXIdentifier") == label) }
+  }
+  // Reading the whole screen takes about 3 s on a busy app. The keys sit
+  // loose at the end of the screen tree's top level, so only the last stretch
+  // of it, from 60 elements before the space bar, is read for each key.
+  _ = screenElements(w, udid)
+  guard let root = screen(w),
+        let space = children(root).lastIndex(where: { key("space", in: named(under: $0)) != nil }) else {
+    fail("No keyboard on screen. Tap or touch a text field first.")
+  }
+  let from = max(0, space - 60)
+  func keys() -> [AXUIElement] {
+    children(root).dropFirst(from).flatMap { named(under: $0) }.filter { str($0, "AXRole") == "AXButton" }
+  }
+  for c in text {
+    let want = names[c] ?? String(c)
+    var pressed = false
+    for _ in 0..<4 {
+      let all = keys()
+      if let k = key(want, in: all) {
+        AXUIElementPerformAction(k, "AXPress" as CFString)
+        pressed = true
+        break
+      }
+      // Letters live on the letters layout, under or over Shift; the rest
+      // on the numbers or symbols layout.
+      let switchTo = c.isLetter
+        ? (key("letters", in: all) == nil ? "shift" : "letters")
+        : (key("numbers", in: all) != nil ? "numbers" : (key("symbols", in: all) != nil ? "symbols" : "numbers"))
+      guard let s = key(switchTo, in: all) else { break }
+      AXUIElementPerformAction(s, "AXPress" as CFString)
+      usleep(250_000)
+    }
+    guard pressed else { fail("The keyboard has no key for \"\(c)\". Typed up to it.") }
+    usleep(120_000)
+  }
 }
 
 let splitItem = "com.apple.springboardhome.application-shortcut-item.open-in-split"
@@ -554,13 +733,24 @@ func split(_ w: AXUIElement, _ udid: String, _ icon: String, bundleID: String?, 
     other app's bundle id.
     """)
   }
-  hold(udid, display: digitizerTarget(liveDisplay(udid, override: display)), centre(w, e), seconds: 1.2)
-  guard let item = waitFor(5, { screenElements(w).first { str($0, "AXIdentifier") == splitItem } }) else {
-    let offered = screenElements(w).filter { str($0, "AXIdentifier").hasPrefix("com.apple.springboardhome.application-shortcut-item") }
+  // The finger stays down until the menu shows, and lifts at once: held past
+  // the menu, the Home Screen goes into jiggle mode and the menu closes.
+  let shortcut = { (e: AXUIElement) in str(e, "AXIdentifier").hasPrefix("com.apple.springboardhome.application-shortcut-item") }
+  let d = liveDisplay(udid, override: display)
+  let at = touchPoint(of: e, w, udid, on: d)
+  touches(udid, display: digitizerTarget(d)) { send in
+    send(.start, at)
+    usleep(400_000)
+    _ = waitFor(4, { screenElements(w).contains(where: shortcut) ? true : nil })
+    send(.end, at)
+  }
+  guard let item = waitFor(3, { screenElements(w).first { str($0, "AXIdentifier") == splitItem } }) else {
+    let offered = screenElements(w).filter(shortcut)
     let have = offered.map(label).joined(separator: ", ")
-    if !offered.isEmpty { press(w, "Home") }
+    // Home closes the menu, or ends jiggle mode if the hold started it.
+    press(w, "Home")
     fail(offered.isEmpty
-      ? "Long-pressing \"\(icon)\" didn't open its menu."
+      ? "Long-pressing \"\(icon)\" didn't open its menu. Pressed Home to leave the Home Screen as it was."
       : "\"\(icon)\" has no Open in Split View. Its menu offered: \(have)")
   }
   let err = AXUIElementPerformAction(item, "AXPress" as CFString)
@@ -571,7 +761,7 @@ func split(_ w: AXUIElement, _ udid: String, _ icon: String, bundleID: String?, 
   guard launched.status == 0 else { fail("Split View opened, but launching \(bundleID) failed: \(launched.text)") }
 }
 
-let version = "0.3.0"
+let version = "0.4.0"
 
 let usage = """
 usage: devicehubctl <udid> controls            list the device's buttons
@@ -580,6 +770,8 @@ usage: devicehubctl <udid> controls            list the device's buttons
        devicehubctl <udid> rotate [times]      rotate right, 90 degrees each
        devicehubctl <udid> tree                what's on the device's screen
        devicehubctl <udid> tap <label|id>      tap something on the screen
+                                               (<label>#2 picks the second of several)
+       devicehubctl <udid> type <text>         type with the on-screen keyboard
        devicehubctl <udid> longpress <label|id> [seconds]
                                                touch and hold it (1.2 s)
        devicehubctl <udid> split <icon> [<bundle id>]
@@ -595,6 +787,7 @@ On an iPhone Duo, touches go to the live display. --display outer|inner
 picks one instead.
 """
 
+let started = Date()
 var args = Array(CommandLine.arguments.dropFirst())
 if args.first == "--version" { print(version); exit(0) }
 if args.first == "-h" || args.first == "--help" { print(usage); exit(0) }
@@ -606,11 +799,6 @@ if let i = args.firstIndex(of: "--display") {
 }
 guard args.count >= 2 else { fail(usage) }
 let udid = args[0]
-
-// One devicehubctl at a time, across every session on this Mac. Two runs
-// opening windows at once could each pick up the other's new window.
-let lockFD = open((NSTemporaryDirectory() as NSString).appendingPathComponent("devicehubctl.lock"), O_CREAT | O_RDWR, 0o644)
-if lockFD >= 0 { flock(lockFD, LOCK_EX) }
 
 // touch and drag don't need DeviceHub's window, only a booted simulator.
 func numbers(_ from: ArraySlice<String>) -> [Double] {
@@ -629,10 +817,10 @@ if args[1] == "touch" || args[1] == "drag" {
   }
   let d = liveDisplay(device.udid, override: displayOverride)
   if points == 2 {
-    hold(device.udid, display: digitizerTarget(d), native((n[0], n[1]), on: d), seconds: n.count > 2 ? n[2] : 0.1)
+    hold(device.udid, display: digitizerTarget(d), touchPoint((n[0], n[1]), device.udid, on: d), seconds: n.count > 2 ? n[2] : 0.1)
   } else {
-    drag(device.udid, display: digitizerTarget(d), from: native((n[0], n[1]), on: d), to: native((n[2], n[3]), on: d),
-         seconds: n.count > 4 ? n[4] : 0.5)
+    drag(device.udid, display: digitizerTarget(d), from: touchPoint((n[0], n[1]), device.udid, on: d),
+         to: touchPoint((n[2], n[3]), device.udid, on: d), seconds: n.count > 4 ? n[4] : 0.5)
   }
   exit(0)
 }
@@ -650,12 +838,14 @@ case "pose" where args.count == 3:
   let labels = ["closed": "Closed", "partial": "Partially Open", "open": "Open"]
   guard let label = labels[args[2]] else { fail(usage) }
   press(w, label)
+  settle(w, target, live: args[2] == "closed" ? .outer : .inner, since: started, label)
 case "rotate":
   let times = args.count > 2 ? Int(args[2]) ?? 1 : 1
   for _ in 0..<times {
     press(w, "Rotate Right")
     usleep(700_000)
   }
+  recordTurns(target, recordedTurns(target) + times)
 case "tree":
   let elements = screenElements(w, target)
   guard !elements.isEmpty else { fail("DeviceHub isn't showing anything on this device's screen yet.") }
@@ -666,6 +856,8 @@ case "tree":
     if !str(e, "AXIdentifier").isEmpty { line += " id=\(str(e, "AXIdentifier"))" }
     print(line)
   }
+case "type" where args.count == 3:
+  type(w, target, args[2])
 case "tap" where args.count == 3:
   tap(w, target, args[2])
 case "longpress" where args.count == 3 || args.count == 4:

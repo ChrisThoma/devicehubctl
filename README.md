@@ -59,8 +59,9 @@ cp .build/release/devicehubctl /usr/local/bin/
 | `devicehubctl <udid> rotate [times]` | Rotate right, 90° each time |
 | `devicehubctl <udid> controls` | List the buttons under the device |
 | `devicehubctl <udid> press "<label>"` | Press one of them, e.g. `Home` |
-| `devicehubctl <udid> tree` | List what's on the screen: role, label, value, identifier |
-| `devicehubctl <udid> tap "<label or id>"` | Tap something `tree` listed |
+| `devicehubctl <udid> tree` | List what's on the screen: role, label, value (what VoiceOver speaks, e.g. `3 times` for a stepper), identifier |
+| `devicehubctl <udid> tap "<label or id>"` | Tap something `tree` listed. `"<label>#2"` picks the second of several |
+| `devicehubctl <udid> type "<text>"` | Type into the focused field with the on-screen keyboard |
 | `devicehubctl <udid> longpress "<label or id>" [seconds]` | Touch and hold it, 1.2 seconds unless you say otherwise |
 | `devicehubctl <udid> split "<icon>" [<bundle id>]` | Open a Home Screen app in Split View, and launch another app beside it |
 | `devicehubctl <udid> touch <x> <y> [seconds]` | Touch a point, 0.1 seconds unless you say otherwise |
@@ -77,8 +78,10 @@ than switching one you or another tool are looking at.
 
 Each simulator gets its own DeviceHub window, matched by the UDID selected in the
 window's sidebar, so two simulators with the same name never get mixed up. Runs
-from different terminals or agents take turns through a lock file, so they never
-open windows at the same moment. Tested with two iPhone Duo simulators unfolded at
+from different terminals or agents take turns through a lock file while one of
+them opens or switches a window, so they never do that at the same moment. Taps,
+touches, folds and reads don't wait for each other, so one agent's long press
+doesn't hold up another agent's fold. Tested with two iPhone Duo simulators unfolded at
 the same time, and again with both renamed to the same name.
 
 With several devices open, DeviceHub sometimes leaves a window's screen tree
@@ -103,8 +106,10 @@ xcrun simctl io <udid> screenshot --display=1 outer.png   # live when closed
 xcrun simctl io <udid> screenshot --display=3 inner.png   # live when partially open or open
 ```
 
-The display that isn't live captures black. Give a pose change about three seconds
-before you screenshot.
+The display that isn't live captures black. `pose` returns once the fold has
+landed, which takes 3 to 5 seconds: the display it lights is live and its screen
+tree has filled in. It prints how long that took. A screenshot taken right after
+it shows the new pose.
 
 ### Touches
 
@@ -116,8 +121,20 @@ the way idb does, except they also reach the Duo's inner display.
 `xcrun simctl io <udid> screenshot --display=N` saves, measured from its top left
 corner. That's the screenshot as saved, without turning it, so the Duo's inner
 display counts in its landscape screenshot even though the display is portrait
-underneath. `touch 0.5 0.5` is always the middle. These two don't need
-DeviceHub's window or Accessibility access, only a booted simulator.
+underneath, and a device turned with `rotate` counts in its turned screenshot.
+`touch 0.5 0.5` is always the middle. These two don't need DeviceHub's window or
+Accessibility access, only a booted simulator.
+
+`rotate` records each turn per simulator, and touches follow it. If the app
+didn't turn with the device (its screenshot keeps its shape), touches follow the
+app instead. A rotation made by hand in DeviceHub isn't recorded; rotate back
+upright by hand, or keep rotating with `devicehubctl`.
+
+`longpress` and `split` find an element's place from the screen tree. DeviceHub
+reports that tree's frame at the inner display's portrait size whichever display
+is live, so `devicehubctl` measures the live display from its screenshot at the
+same scale. Before 0.4.0 it didn't, and long presses on the outer display landed
+up and to the left of their target.
 
 On a Duo, touches go to whichever display is live, found by screenshotting both
 and taking the one that isn't black. `--display outer` or `--display inner`
@@ -136,7 +153,9 @@ devicehubctl <udid> split Settings dev.individuation.chiptune
 ```
 
 `split` long-presses the icon, looking through the Home Screen's pages for it,
-and chooses Open in Split View. That app takes the left half. The right half
+and chooses Open in Split View. It keeps the finger down until the icon's menu
+shows and lifts it then, since holding on past the menu starts jiggle mode. If
+no menu comes, it presses Home so the Home Screen isn't left jiggling. That app takes the left half. The right half
 shows a Home Screen that DeviceHub leaves out of the screen tree, so `split`
 launches the bundle id you pass with `simctl launch`, which opens it there. If
 the icon's menu has no Open in Split View, it says what the menu offered.
@@ -150,19 +169,24 @@ General instead of its main list.
 
 ## Limits
 
-- **No typing.** Setting a text field's value through accessibility shows the
-  text in the field, but the app never receives it. Use a launch argument, a
-  fixture, or the app's own suggestion buttons.
+- **Typing goes through the on-screen keyboard.** `type` presses its keys one at
+  a time, about one a second, switching to Shift and the number or symbol
+  layouts as it needs to. iOS autocorrect still applies, so check the field with
+  `tree` afterwards. Keys that aren't on the on-screen keyboard (arrows, Escape,
+  Command shortcuts) can't be sent, and setting a field's value through
+  accessibility shows the text without the app receiving it.
+- **Navigation bar buttons aren't in `tree`.** Edit, Done, Close and Cancel in
+  a sheet's or popover's bar never reach DeviceHub's accessibility tree. Touch
+  them at their place in a screenshot.
 - **One finger.** `touch`, `drag` and `longpress` send a single touch. There's
   no pinch or two-finger gesture.
-- **Unrotated only.** The screenshot-to-touch mapping is checked on devices that
-  haven't been turned with `rotate`. After a rotation, check where a `touch` lands
-  before relying on it.
+- **Rotation is checked on some turns.** Touches were checked on the outer
+  display at 0, 1 and 3 turns and on the inner display at 0 and 1. Upside down
+  hasn't been checked.
 - **No Home Screen swipes.** A drag across the Home Screen doesn't turn the
   page. `split` uses the page dots' accessibility actions instead.
 - **No coordinates in `tree`.** It lists elements by label and identifier only.
-  Its frames come from DeviceHub's zoomed window, not the device's points. Take
-  coordinates for `touch` from a screenshot.
+  Take coordinates for `touch` from a screenshot.
 - **Button labels can change.** It presses DeviceHub's buttons by their labels
   (Closed, Partially Open, Open, Rotate Right). If an Xcode update renames them,
   `controls` shows the new names.

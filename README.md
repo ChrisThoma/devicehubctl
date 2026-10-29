@@ -77,13 +77,10 @@ than switching one you or another tool are looking at.
 
 ### Several simulators at once
 
-Each simulator gets its own DeviceHub window, matched by the UDID selected in the
-window's sidebar, so two simulators with the same name never get mixed up. Runs
-from different terminals or agents take turns through a lock file while one of
-them opens or switches a window, so they never do that at the same moment. Taps,
-touches, folds and reads don't wait for each other, so one agent's long press
-doesn't hold up another agent's fold. Tested with two iPhone Duo simulators unfolded at
-the same time, and again with both renamed to the same name.
+Each simulator gets its own DeviceHub window, matched by UDID, so two simulators
+with the same name never get mixed up. Runs from different terminals or agents
+take turns only while one opens or switches a window; taps, touches, folds and
+reads don't wait for each other.
 
 With several devices open, DeviceHub sometimes leaves a window's screen tree
 empty. When `tree` or `tap` find it empty, `devicehubctl` briefly shows a
@@ -108,9 +105,9 @@ xcrun simctl io <udid> screenshot --display=3 inner.png   # live when partially 
 ```
 
 The display that isn't live captures black. `pose` returns once the fold has
-landed, which takes 3 to 5 seconds: the display it lights is live and its screen
-tree has filled in. It prints how long that took. A screenshot taken right after
-it shows the new pose.
+landed and the screen tree has filled in, and prints how long that took: usually
+3 to 5 seconds, 15 or more just after a boot or on a busy Mac. A screenshot taken
+right after it shows the new pose.
 
 ### Touches
 
@@ -119,12 +116,10 @@ it shows the new pose.
 the way idb does, except they also reach the Duo's inner display.
 
 `touch` and `drag` take points as fractions, 0 to 1, of the screenshot
-`xcrun simctl io <udid> screenshot --display=N` saves, measured from its top left
-corner. That's the screenshot as saved, without turning it, so the Duo's inner
-display counts in its landscape screenshot even though the display is portrait
-underneath, and a device turned with `rotate` counts in its turned screenshot.
-`touch 0.5 0.5` is always the middle. These two don't need DeviceHub's window or
-Accessibility access, only a booted simulator.
+`xcrun simctl io <udid> screenshot --display=N` saves, from its top left corner,
+as saved: the Duo's inner display counts in its landscape screenshot, and a
+device turned with `rotate` in its turned one. These two need only a booted
+simulator, not DeviceHub or Accessibility access.
 
 `rotate` records each turn per simulator, and touches follow it. If the app
 didn't turn with the device (its screenshot keeps its shape), touches follow the
@@ -132,12 +127,10 @@ app instead. A rotation made by hand in DeviceHub isn't recorded; rotate back
 upright by hand, or keep rotating with `devicehubctl`.
 
 `longpress` and `split` find an element's place from the screen tree. DeviceHub
-reports that tree's frame at the inner display's portrait size whichever display
-is live, and apps lay their elements out the way the screenshot shows them, so
-`devicehubctl` measures the live display from its screenshot at the same scale.
-The Home Screen is the exception: it's laid out in the display's native frame,
-and is read that way. Before 0.4.0, long presses in apps landed in the wrong
-place, up and to the left on the outer display.
+reports that tree at the inner display's portrait size whichever display is
+live, so `devicehubctl` scales it to the live display's screenshot. Apps are
+read the way their screenshot shows them, and the Home Screen in the display's
+native frame.
 
 On a Duo, touches go to whichever display is live, found by screenshotting both
 and taking the one that isn't black. `--display outer` or `--display inner`
@@ -155,24 +148,16 @@ devicehubctl <udid> press Home
 devicehubctl <udid> split Settings dev.individuation.chiptune
 ```
 
-`split` long-presses the icon, looking through the Home Screen's pages for it,
-and chooses Open in Split View. It holds the icon for 1 s. The menu only opens
-for a hold lifted between about 0.7 and 1.5 s, and from about 2 s the Home
-Screen goes into jiggle mode instead. Until 0.4.1 the finger stayed down until
-a read of the screen tree showed the menu; a read takes a second or more, and
-on a busy Mac the lift came too late and Split View failed. If no menu comes,
-it presses Home and tries once more, and presses Home again before giving up so
-the Home Screen isn't left jiggling. That app takes the left half. The right half
-shows a Home Screen that DeviceHub leaves out of the screen tree, so `split`
-launches the bundle id you pass with `simctl launch`, which opens it there. If
-the icon's menu has no Open in Split View, it says what the menu offered.
+`split` finds the icon on the Home Screen's pages, holds it for 1 second and
+chooses Open in Split View. The icon's menu opens only for a hold of about 0.7
+to 1.5 seconds; from about 2 seconds the Home Screen goes into jiggle mode
+instead. If no menu comes, it presses Home and tries once more. The icon's app
+takes the left half, and the bundle id you pass is launched into the right. If
+the menu has no Open in Split View, it says what the menu offered.
 
-The divider sits at x 0.5 of the inner display's screenshot. Dragging it moves
-the panes while the finger is down, but on release they settle back at half,
-from anywhere between about 0.24 and 0.76. Released at 0.18 or less, or 0.8 or
-more, Split View closes and the app on the larger side fills the screen. An app
-can still notice the resize: twice, Settings came back from a drag showing
-General instead of its main list.
+The divider sits at x 0.5 of the inner display's screenshot. Released between
+about 0.24 and 0.76 it settles back at half; at 0.18 or less, or 0.8 or more,
+Split View closes.
 
 ## Limits
 

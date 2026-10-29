@@ -49,7 +49,8 @@ captured.
 - `--display=3`: the inner screen, live when partially open or open
 
 The display that isn't live captures black. `pose` returns only once the fold
-has landed (3 to 5 s) and prints how long it took, so a screenshot right after
+has landed (3 to 5 s, 15 s or more after a boot or on a busy Mac) and prints
+how long it took, so a screenshot right after
 it shows the new pose. A pose change is never instant: to fold during something
 short (an export, an animation), make that thing last 10 s or more, or the fold
 lands after it has finished.

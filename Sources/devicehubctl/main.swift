@@ -733,18 +733,22 @@ func split(_ w: AXUIElement, _ udid: String, _ icon: String, bundleID: String?, 
     other app's bundle id.
     """)
   }
-  // The finger stays down until the menu shows, and lifts at once: held past
-  // the menu, the Home Screen goes into jiggle mode and the menu closes.
+  // The menu opens only for a hold lifted between about 0.7 and 1.5 s: shorter
+  // does nothing, and from about 2 s the Home Screen goes into jiggle mode
+  // instead. So the hold is timed, not ended by watching the tree, whose reads
+  // take 1 to 18 s. One retry after Home covers a touch SpringBoard missed.
   let shortcut = { (e: AXUIElement) in str(e, "AXIdentifier").hasPrefix("com.apple.springboardhome.application-shortcut-item") }
   let d = liveDisplay(udid, override: display)
   let at = touchPoint(of: e, w, udid, on: d)
-  touches(udid, display: digitizerTarget(d)) { send in
-    send(.start, at)
-    usleep(400_000)
-    _ = waitFor(4, { screenElements(w).contains(where: shortcut) ? true : nil })
-    send(.end, at)
+  var found: AXUIElement?
+  for attempt in 1...2 {
+    hold(udid, display: digitizerTarget(d), at, seconds: 1.0)
+    found = waitFor(4, { screenElements(w).first { str($0, "AXIdentifier") == splitItem } })
+    if found != nil || attempt == 2 || screenElements(w).contains(where: shortcut) { break }
+    press(w, "Home")
+    sleep(1)
   }
-  guard let item = waitFor(3, { screenElements(w).first { str($0, "AXIdentifier") == splitItem } }) else {
+  guard let item = found else {
     let offered = screenElements(w).filter(shortcut)
     let have = offered.map(label).joined(separator: ", ")
     // Home closes the menu, or ends jiggle mode if the hold started it.
@@ -761,7 +765,7 @@ func split(_ w: AXUIElement, _ udid: String, _ icon: String, bundleID: String?, 
   guard launched.status == 0 else { fail("Split View opened, but launching \(bundleID) failed: \(launched.text)") }
 }
 
-let version = "0.4.0"
+let version = "0.4.1"
 
 let usage = """
 usage: devicehubctl <udid> controls            list the device's buttons

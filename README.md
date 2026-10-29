@@ -156,9 +156,13 @@ devicehubctl <udid> split Settings dev.individuation.chiptune
 ```
 
 `split` long-presses the icon, looking through the Home Screen's pages for it,
-and chooses Open in Split View. It keeps the finger down until the icon's menu
-shows and lifts it then, since holding on past the menu starts jiggle mode. If
-no menu comes, it presses Home so the Home Screen isn't left jiggling. That app takes the left half. The right half
+and chooses Open in Split View. It holds the icon for 1 s. The menu only opens
+for a hold lifted between about 0.7 and 1.5 s, and from about 2 s the Home
+Screen goes into jiggle mode instead. Until 0.4.1 the finger stayed down until
+a read of the screen tree showed the menu; a read takes a second or more, and
+on a busy Mac the lift came too late and Split View failed. If no menu comes,
+it presses Home and tries once more, and presses Home again before giving up so
+the Home Screen isn't left jiggling. That app takes the left half. The right half
 shows a Home Screen that DeviceHub leaves out of the screen tree, so `split`
 launches the bundle id you pass with `simctl launch`, which opens it there. If
 the icon's menu has no Open in Split View, it says what the menu offered.

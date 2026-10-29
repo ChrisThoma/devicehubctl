@@ -108,10 +108,12 @@ devicehubctl <udid> split Settings <bundle id of the other app>
 ```
 
 The icon's app takes the left half and the bundle id is launched into the right
-half. `split` turns Home Screen pages to find the icon, holds it until its menu
-shows, and presses Home if no menu comes, so the Home Screen isn't left in
-jiggle mode. If the menu has no "Open
-in Split View", it lists what the menu offered. The divider (x 0.5 in the inner
+half. `split` turns Home Screen pages to find the icon and holds it for 1 s.
+The menu only opens for a hold lifted between about 0.7 and 1.5 s; from 2 s
+the Home Screen goes into jiggle mode instead. If no menu comes it presses Home
+and tries once more, then presses Home again and fails, so the Home Screen
+isn't left in jiggle mode. If the menu has no "Open in Split View", it lists
+what the menu offered. The divider (x 0.5 in the inner
 screenshot) settles back at half after a drag released between about 0.24 and
 0.76; released at 0.18 or less, or 0.8 or more, Split View closes. Run `split`
 again to get it back.

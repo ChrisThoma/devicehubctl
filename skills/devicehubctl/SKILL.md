@@ -1,13 +1,14 @@
 ---
 name: devicehubctl
 description: >-
-  Fold and unfold an iPhone Duo simulator (closed, partially open, open), rotate
-  any iOS simulator, read the simulated screen, and tap, long-press or drag on it
-  through Xcode 27's DeviceHub with the `devicehubctl` command-line tool. Use when
-  a task needs a Duo pose, Split View on a Duo, the Duo's inner display, a rotation
-  or landscape coverage, or when idb or a simulator MCP server's tree, tap and
-  swipe tools fail on an iPhone Duo. Also use in bug hunts and UI checks that
-  target a Duo.
+  Fold and unfold an iPhone Duo simulator (closed, partially open, open) or sweep
+  its hinge to any angle, rotate any iOS simulator, read the simulated screen,
+  and tap, long-press or drag on it through Xcode 27's DeviceHub with the
+  `devicehubctl` command-line tool. Use when a task needs a Duo pose or a hinge
+  angle (UIHingeInteraction), Split View on a Duo, the Duo's inner display, a
+  rotation or landscape coverage, or when idb or a simulator MCP server's tree,
+  tap and swipe tools fail on an iPhone Duo. Also use in bug hunts and UI checks
+  that target a Duo.
 ---
 
 # devicehubctl

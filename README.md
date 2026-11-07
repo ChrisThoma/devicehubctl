@@ -2,11 +2,13 @@
 
 ![devicehubctl: fold, rotate and tap iOS simulators from the terminal](https://individuation.dev/projects/devicehubctl/share-card.png)
 
-Fold, unfold and rotate iOS simulators from the command line, and read, tap,
-long-press, drag or type on what's on their screen, through Xcode 27's DeviceHub.
+Fold, unfold and rotate iOS simulators from the command line, sweep an iPhone
+Duo's hinge to any angle, and read, tap, long-press, drag or type on what's on
+their screen, through Xcode 27's DeviceHub.
 
 ```sh
 devicehubctl <udid> pose open        # iPhone Duo: closed, partial or open
+devicehubctl <udid> hinge 60         # or any angle from 0 to 180
 devicehubctl <udid> rotate           # 90° right
 devicehubctl <udid> tree             # what's on the device's screen
 devicehubctl <udid> tap "Continue"   # tap it
@@ -112,6 +114,40 @@ landed and the screen tree has filled in, and prints how long that took: usually
 3 to 5 seconds, 15 or more just after a boot or on a busy Mac. A screenshot taken
 right after it shows the new pose.
 
+### Any hinge angle
+
+DeviceHub's pose buttons stop at three angles: closed, partially open and open.
+`hinge` moves a Duo's hinge to any angle from 0 to 180 degrees, over as many
+seconds as you give it, through SpringBoard's own test service. Apps get the same
+`UIHingeInteraction` updates, status changes and display hand-off they get from a
+real fold.
+
+```sh
+devicehubctl <udid> hinge 60                      # sweep to 60 degrees over 2 s
+devicehubctl <udid> hinge 180 8                   # open slowly, over 8 s
+devicehubctl <udid> hinge timeline 120:1 60:1:3 180:2   # hold 3 s at 60 on the way
+devicehubctl <udid> hinge replay medium           # a fold recorded from a real Duo
+```
+
+A timeline step is `degrees[:seconds[:hold]]`, and each step adds about 0.6 s. A
+sweep with 0 seconds still takes about 0.3 s, and a sweep can't be reversed
+partway. `hinge replay` returns at once, before the fold has finished. Apps get an
+update for each degree moved, and none during a hold.
+
+Which display is live after a sweep depends on where it started, so screenshot
+both before you rely on one. From 180 to 60 degrees the outer display took over,
+with `--fade`, `--continuous` or neither. From 120 to 60 with no flag the inner
+one stayed live.
+
+The angle stays where the sweep left it until DeviceHub moves the hinge. DeviceHub
+doesn't see sweeps, so a `pose` afterwards starts from DeviceHub's own last angle.
+
+`hinge` needs only a booted simulator, not DeviceHub's window or Accessibility
+access. The first time, it builds a small helper for the simulator and caches it
+in `~/Library/Caches/devicehubctl`. It runs the helper inside the simulator with
+`simctl spawn`, and the helper talks to a private SpringBoard service. Nothing is
+injected and SpringBoard isn't changed.
+
 ### Touches
 
 `tap` presses an element through accessibility, which isn't a finger. `longpress`,
@@ -182,6 +218,8 @@ Split View closes.
   page. `split` uses the page dots' accessibility actions instead.
 - **No coordinates in `tree`.** It lists elements by label and identifier only.
   Take coordinates for `touch` from a screenshot.
+- **The hinge depends on a private service.** `hinge` is tested on the iOS 27.1
+  runtime only, and a new Xcode could break it.
 - **Button labels can change.** It presses DeviceHub's buttons by their labels
   (Closed, Partially Open, Open, Rotate Right). If an Xcode update renames them,
   `controls` shows the new names.

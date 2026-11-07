@@ -25,6 +25,9 @@ user to.
 
 ```sh
 devicehubctl <udid> pose closed|partial|open   # iPhone Duo only
+devicehubctl <udid> hinge <degrees> [seconds] [--fade|--continuous]   # any angle, Duo only
+devicehubctl <udid> hinge timeline <degrees>[:<seconds>[:<hold>]] ...
+devicehubctl <udid> hinge replay fast|medium|slow [open|close|both]   # a real Duo's fold
 devicehubctl <udid> rotate [times]             # 90° right each time
 devicehubctl <udid> controls                   # the bar under the device
 devicehubctl <udid> press "<label>"            # any of those, e.g. Home
@@ -54,6 +57,31 @@ how long it took, so a screenshot right after
 it shows the new pose. A pose change is never instant: to fold during something
 short (an export, an animation), make that thing last 10 s or more, or the fold
 lands after it has finished.
+
+## Hinge angles
+
+`hinge` sweeps a Duo to any angle from 0 to 180 through SpringBoard's own test
+service, so apps get real `UIHingeInteraction` updates, status changes and the
+display hand-off. `pose` stops at three angles; use `hinge` to hold 60 degrees,
+open slowly, or flap. Default sweep is 2 s; `seconds` 0 still takes about 0.3 s.
+
+- Which display is live depends on the path, and the flags don't pin it.
+  Measured on 2026-11-07: from 180 to 60 the outer display took over with
+  `--continuous`, with `--fade` and with neither. From 120 to 60 with no flag
+  the inner one stayed live. Check with a screenshot of each display
+  (`--display=1` outer, `--display=3` inner) before relying on one.
+- `simctl io recordVideo --display=3` frames come out portrait (2006x2852).
+  Turn them to match the landscape screenshot with
+  `ffmpeg -noautorotate -i in.mp4 -vf transpose=1`: the file also carries
+  rotation metadata, which ffmpeg otherwise applies on its own.
+- A timeline step is `degrees[:seconds[:hold]]`, about 0.6 s extra per step. A
+  sweep can't be reversed partway.
+- `hinge replay` returns at once, before the fold has finished.
+- Apps get an update per degree moved, not a timed stream, and none during a hold.
+- A `pose` after a sweep starts from DeviceHub's own last angle, not the app's.
+- Tested on the iOS 27.1 runtime only. A new Xcode could break it, because it
+  uses a private SpringBoard service and a simulator-only helper it builds on
+  first use.
 
 ## Reading and tapping the screen
 

@@ -765,12 +765,158 @@ func split(_ w: AXUIElement, _ udid: String, _ icon: String, bundleID: String?, 
   guard launched.status == 0 else { fail("Split View opened, but launching \(bundleID) failed: \(launched.text)") }
 }
 
+// MARK: Hinge
+
+// DeviceHub's pose buttons stop at three angles. SpringBoard itself has a test
+// service, com.apple.springboard.sbdisplay, that sweeps the hinge to any angle
+// through the system's own path, so apps get UIHingeInteraction updates, status
+// changes and the display hand-off as they do from a real fold. Its client
+// class is in SpringBoardServices, but only a process inside the simulator can
+// reach it, and SpringBoard asks that process for the entitlement
+// com.apple.springboard.sbdisplay.service. So a small helper is compiled here
+// for the simulator and run with simctl spawn. It carries the entitlement in a
+// __TEXT,__entitlements section, which is how Xcode gives simulator builds
+// theirs. Nothing is injected and SpringBoard is unchanged.
+//
+// The helper parses with SBFDisplayToolSwapSettingsFromArguments, Apple's own
+// parser, so the settings struct is only ever passed through. A step's position
+// is degrees / 180. Each swap takes a 10 s test lock, and the angle stays where
+// it landed after that until DeviceHub moves the hinge. The hinge DeviceHub
+// moves (CoreMotion's CMAngle) doesn't follow these sweeps.
+
+let hingeHelperSource = #"""
+#import <Foundation/Foundation.h>
+#import <dlfcn.h>
+typedef struct { long long w[8]; } Swap;     // SBFDisplayToolSwapSettings, 64 bytes
+typedef struct { long long w[15]; } Replay;  // SBFHingeReplaySettings, 120 bytes
+@interface SBSDisplayToolServiceConnection : NSObject
+- (void)swapDisplayWithSettings:(Swap)s completionHandler:(void (^)(NSError *))c;
+- (void)replayHingeSamplesWithSettings:(Replay)s samplesPath:(NSString *)p completionHandler:(void (^)(NSError *))c;
+@end
+static NSError *await(void (^call)(void (^)(NSError *))) {
+  __block NSError *result = nil;
+  dispatch_semaphore_t done = dispatch_semaphore_create(0);
+  call(^(NSError *e) { result = e; dispatch_semaphore_signal(done); });
+  if (dispatch_semaphore_wait(done, dispatch_time(DISPATCH_TIME_NOW, 300 * NSEC_PER_SEC)))
+    return [NSError errorWithDomain:@"devicehubctl" code:1 userInfo:@{NSLocalizedDescriptionKey: @"SpringBoard didn't answer"}];
+  return result;
+}
+int main(int argc, char **argv) { @autoreleasepool {
+  dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
+  void *foundation = dlopen("/System/Library/PrivateFrameworks/SpringBoardFoundation.framework/SpringBoardFoundation", RTLD_NOW);
+  BOOL (*parseSwap)(NSArray *, Swap *, NSError **) = dlsym(foundation, "SBFDisplayToolSwapSettingsFromArguments");
+  BOOL (*parseReplay)(NSArray *, Replay *, NSError **) = dlsym(foundation, "SBFHingeReplaySettingsFromArguments");
+  Class connection = NSClassFromString(@"SBSDisplayToolServiceConnection");
+  if (!parseSwap || !parseReplay || !connection || argc < 3) { fprintf(stderr, "This simulator runtime has no hinge test service.\n"); return 3; }
+  SBSDisplayToolServiceConnection *c = [connection new];
+  if (!strcmp(argv[1], "replay")) {
+    NSMutableArray *args = [NSMutableArray array];
+    for (int i = 2; i < argc; i++) [args addObject:@(argv[i])];
+    Replay s = {0}; NSError *e = nil;
+    if (!parseReplay(args, &s, &e)) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); return 2; }
+    e = await(^(void (^r)(NSError *)) { [c replayHingeSamplesWithSettings:s samplesPath:nil completionHandler:r]; });
+    if (e) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); return 1; }
+    return 0;
+  }
+  // sweep <degrees>:<seconds>[:<hold>[:fade|continuous]] ...
+  for (int i = 2; i < argc; i++) {
+    NSArray *p = [@(argv[i]) componentsSeparatedByString:@":"];
+    double degrees = [p[0] doubleValue], seconds = p.count > 1 ? [p[1] doubleValue] : 2, hold = p.count > 2 ? [p[2] doubleValue] : 0;
+    NSMutableArray *args = [@[[NSString stringWithFormat:@"-position=%.6f", degrees / 180], [NSString stringWithFormat:@"-duration=%g", seconds], @"-wait"] mutableCopy];
+    if (p.count > 3 && [p[3] length]) [args addObject:[@"-" stringByAppendingString:p[3]]];
+    Swap s = {0}; NSError *e = nil;
+    if (!parseSwap(args, &s, &e)) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); return 2; }
+    NSDate *start = [NSDate date];
+    e = await(^(void (^r)(NSError *)) { [c swapDisplayWithSettings:s completionHandler:r]; });
+    if (e) { fprintf(stderr, "%s: %s\n", argv[i], e.localizedDescription.UTF8String); return 1; }
+    printf("%s took %.2f s\n", argv[i], -start.timeIntervalSinceNow); fflush(stdout);
+    if (hold > 0) usleep(hold * 1e6);
+  }
+  return 0;
+} }
+"""#
+
+// The helper, built on first use and kept per source version.
+func hingeHelper() -> String {
+  let hash = hingeHelperSource.utf8.reduce(UInt64(14695981039346656037)) { ($0 ^ UInt64($1)) &* 1099511628211 }
+  let dir = (NSHomeDirectory() as NSString).appendingPathComponent("Library/Caches/devicehubctl")
+  let path = (dir as NSString).appendingPathComponent("hinge-helper-" + String(hash, radix: 16))
+  if FileManager.default.isExecutableFile(atPath: path) { return path }
+  try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+  let source = path + ".m", entitlements = path + ".plist", building = path + ".\(getpid())"
+  defer { for f in [source, entitlements, building] { try? FileManager.default.removeItem(atPath: f) } }
+  let plist = """
+  <?xml version="1.0" encoding="UTF-8"?>
+  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+  <plist version="1.0"><dict><key>com.apple.springboard.sbdisplay.service</key><true/></dict></plist>
+  """
+  try? hingeHelperSource.write(toFile: source, atomically: true, encoding: .utf8)
+  try? plist.write(toFile: entitlements, atomically: true, encoding: .utf8)
+  let built = output("/usr/bin/xcrun", ["--sdk", "iphonesimulator", "clang", "-fobjc-arc", "-arch", "arm64",
+                                        "-mios-simulator-version-min=27.1", "-framework", "Foundation",
+                                        "-Wl,-sectcreate,__TEXT,__entitlements," + entitlements, source, "-o", building])
+  guard built.status == 0 else { fail("Couldn't build the hinge helper:\n\(built.text)") }
+  guard output("/usr/bin/codesign", ["-s", "-", "-f", building]).status == 0 else { fail("Couldn't sign the hinge helper.") }
+  try? FileManager.default.moveItem(atPath: building, toPath: path)
+  return path
+}
+
+func runHingeHelper(_ udid: String, _ arguments: [String]) -> Never {
+  let p = Process()
+  p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+  p.arguments = ["simctl", "spawn", udid, hingeHelper()] + arguments
+  try! p.run()
+  p.waitUntilExit()
+  exit(p.terminationStatus)
+}
+
+// degrees:seconds[:hold], checked here so a typo fails before anything moves.
+func hingeStep(_ text: String) -> String {
+  let n = text.split(separator: ":", omittingEmptySubsequences: false).map { Double($0) }
+  guard (1...3).contains(n.count), !n.contains(where: { $0 == nil }), let degrees = n[0], (0...180).contains(degrees),
+        n.dropFirst().allSatisfy({ $0! >= 0 }) else {
+    fail("A step is <degrees 0-180>[:<seconds>[:<hold seconds>]], not \"\(text)\".")
+  }
+  return text
+}
+
+func hinge(_ udid: String, _ rest: [String]) -> Never {
+  guard isDuo(udid) else { fail("Only an iPhone Duo has a hinge.") }
+  var rest = rest
+  var profile = ""
+  for flag in ["fade", "continuous"] {
+    if let i = rest.firstIndex(of: "--" + flag) { profile = flag; rest.remove(at: i) }
+  }
+  switch rest.first {
+  case "replay"?:
+    guard rest.count >= 2, ["fast", "medium", "slow"].contains(rest[1]) else { fail(usage) }
+    let direction = rest.count > 2 ? rest[2] : "both"
+    guard ["open", "close", "both"].contains(direction) else { fail(usage) }
+    runHingeHelper(udid, ["replay", "-band=" + rest[1], "-count=1", "-direction=" + direction])
+  case "timeline"?:
+    guard rest.count > 1 else { fail(usage) }
+    runHingeHelper(udid, ["sweep"] + rest.dropFirst().map(hingeStep))
+  default:
+    guard (1...2).contains(rest.count), Double(rest[0]) != nil, rest.count == 1 || Double(rest[1]) != nil else { fail(usage) }
+    _ = hingeStep(rest.joined(separator: ":"))
+    let seconds = rest.count > 1 ? rest[1] : "2"
+    runHingeHelper(udid, ["sweep", "\(rest[0]):\(seconds):0:\(profile)"])
+  }
+}
+
 let version = "0.4.1"
 
 let usage = """
 usage: devicehubctl <udid> controls            list the device's buttons
        devicehubctl <udid> press <label>       press one by its label
        devicehubctl <udid> pose closed|partial|open
+       devicehubctl <udid> hinge <degrees> [seconds] [--fade|--continuous]
+                                               sweep a Duo's hinge to any angle (2 s).
+                                               --fade hands off the display near 85
+                                               degrees, --continuous near 20
+       devicehubctl <udid> hinge timeline <degrees>[:<seconds>[:<hold>]] ...
+       devicehubctl <udid> hinge replay fast|medium|slow [open|close|both]
+                                               play a fold recorded from a real Duo
        devicehubctl <udid> rotate [times]      rotate right, 90 degrees each
        devicehubctl <udid> tree                what's on the device's screen
        devicehubctl <udid> tap <label|id>      tap something on the screen
@@ -804,7 +950,7 @@ if let i = args.firstIndex(of: "--display") {
 guard args.count >= 2 else { fail(usage) }
 let udid = args[0]
 
-// touch and drag don't need DeviceHub's window, only a booted simulator.
+// touch, drag and hinge don't need DeviceHub's window, only a booted simulator.
 func numbers(_ from: ArraySlice<String>) -> [Double] {
   let n = from.compactMap(Double.init)
   guard n.count == from.count else { fail(usage) }
@@ -827,6 +973,12 @@ if args[1] == "touch" || args[1] == "drag" {
          to: touchPoint((n[2], n[3]), device.udid, on: d), seconds: n.count > 4 ? n[4] : 0.5)
   }
   exit(0)
+}
+
+if args[1] == "hinge" {
+  let device = simDevice(udid)
+  guard device.state == "Booted" else { fail("\(device.name) is \(device.state). Boot it first: xcrun simctl boot \(device.udid)") }
+  hinge(device.udid, Array(args[2...]))
 }
 
 let app = deviceHub()

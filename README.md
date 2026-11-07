@@ -57,6 +57,9 @@ cp .build/release/devicehubctl /usr/local/bin/
 | Command | What it does |
 | --- | --- |
 | `devicehubctl <udid> pose closed\|partial\|open` | Fold or unfold an iPhone Duo |
+| `devicehubctl <udid> hinge <degrees> [seconds] [--fade\|--continuous]` | Sweep a Duo's hinge to any angle from 0 to 180 |
+| `devicehubctl <udid> hinge timeline <degrees>[:<seconds>[:<hold>]] ...` | Run several sweeps in a row. Each adds about 0.6 s |
+| `devicehubctl <udid> hinge replay fast\|medium\|slow [open\|close\|both]` | Play a fold recorded from a real Duo |
 | `devicehubctl <udid> rotate [times]` | Rotate right, 90° each time |
 | `devicehubctl <udid> controls` | List the buttons under the device |
 | `devicehubctl <udid> press "<label>"` | Press one of them, e.g. `Home` |

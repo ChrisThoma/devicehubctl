@@ -780,9 +780,10 @@ func split(_ w: AXUIElement, _ udid: String, _ icon: String, bundleID: String?, 
 //
 // The helper parses with SBFDisplayToolSwapSettingsFromArguments, Apple's own
 // parser, so the settings struct is only ever passed through. A step's position
-// is degrees / 180. Each swap takes a 10 s test lock, and the angle stays where
-// it landed after that until DeviceHub moves the hinge. The hinge DeviceHub
-// moves (CoreMotion's CMAngle) doesn't follow these sweeps.
+// is degrees / 180. Each swap takes a 10 s test lock, released when the run ends.
+// The angle stays where it landed until DeviceHub moves the hinge. The hinge
+// DeviceHub moves (CoreMotion's CMAngle) doesn't follow these sweeps, so a pose
+// press after a sweep starts from DeviceHub's last angle, not the app's.
 
 let hingeHelperSource = #"""
 #import <Foundation/Foundation.h>
@@ -792,6 +793,7 @@ typedef struct { long long w[15]; } Replay;  // SBFHingeReplaySettings, 120 byte
 @interface SBSDisplayToolServiceConnection : NSObject
 - (void)swapDisplayWithSettings:(Swap)s completionHandler:(void (^)(NSError *))c;
 - (void)replayHingeSamplesWithSettings:(Replay)s samplesPath:(NSString *)p completionHandler:(void (^)(NSError *))c;
+- (void)unlockForTestingWithCompletion:(void (^)(void))c;  // its reply isn't an object
 @end
 static NSError *await(void (^call)(void (^)(NSError *))) {
   __block NSError *result = nil;
@@ -832,6 +834,11 @@ int main(int argc, char **argv) { @autoreleasepool {
     printf("%s took %.2f s\n", argv[i], -start.timeIntervalSinceNow); fflush(stdout);
     if (hold > 0) usleep(hold * 1e6);
   }
+  // The lock outlives a sweep by up to 10 s and SpringBoard drops DeviceHub's
+  // pose presses while it's held. The angle stays where it is without it.
+  dispatch_semaphore_t unlocked = dispatch_semaphore_create(0);
+  [c unlockForTestingWithCompletion:^{ dispatch_semaphore_signal(unlocked); }];
+  dispatch_semaphore_wait(unlocked, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC));
   return 0;
 } }
 """#

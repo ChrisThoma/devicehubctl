@@ -911,7 +911,7 @@ func hinge(_ udid: String, _ rest: [String]) -> Never {
   }
 }
 
-let version = "0.4.1"
+let version = "0.5.0"
 
 let usage = """
 usage: devicehubctl <udid> controls            list the device's buttons

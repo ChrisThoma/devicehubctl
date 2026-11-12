@@ -66,7 +66,7 @@ cp .build/release/devicehubctl /usr/local/bin/
 | `devicehubctl <udid> controls` | List the buttons under the device |
 | `devicehubctl <udid> press "<label>"` | Press one of them, e.g. `Home` |
 | `devicehubctl <udid> tree` | List what's on the screen: role, label, value (what VoiceOver speaks, e.g. `3 times` for a stepper), identifier |
-| `devicehubctl <udid> tap "<label or id>"` | Tap something `tree` listed. `"<label>#2"` picks the second of several |
+| `devicehubctl <udid> tap "<label or id>"` | Tap something `tree` listed. `"<label>#2"` picks the second of several; a part of a comma-joined row label (`"Bay Leaf Wish"`) works when nothing has it as its whole label |
 | `devicehubctl <udid> type "<text>"` | Type into the focused field with the on-screen keyboard |
 | `devicehubctl <udid> longpress "<label or id>" [seconds]` | Touch and hold it, 1.2 seconds unless you say otherwise |
 | `devicehubctl <udid> split "<icon>" [<bundle id>]` | Open a Home Screen app in Split View, and launch another app beside it |
@@ -160,7 +160,10 @@ as saved: the Duo's inner display counts in its landscape screenshot, and a
 device turned with `rotate` in its turned one. These two need only a booted
 simulator, not DeviceHub or Accessibility access.
 
-`rotate` records each turn per simulator, and touches follow it. If the app
+`rotate` records each turn per simulator, and touches follow it, as do
+`press "Rotate Left"` and `press "Rotate Right"`. On a device with only a Rotate
+Left control (the iPhone SE 3rd generation), `rotate` presses it three times per
+turn. If the app
 didn't turn with the device (its screenshot keeps its shape), touches follow the
 app instead. A rotation made by hand in DeviceHub isn't recorded; rotate back
 upright by hand, or keep rotating with `devicehubctl`.

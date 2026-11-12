@@ -308,10 +308,22 @@ func named(_ target: String) -> (AXUIElement) -> Bool {
   { label($0).caseInsensitiveCompare(target) == .orderedSame || str($0, "AXIdentifier") == target }
 }
 
+// A row that SwiftUI combines into one button reads "SPELL · ABUNDANCE, Bay
+// Leaf Wish, Gives a modest..."; its title is one of those comma parts. Used
+// only when nothing on screen has the target as its whole label.
+func partNamed(_ target: String) -> (AXUIElement) -> Bool {
+  { label($0).components(separatedBy: ", ").contains { $0.trimmingCharacters(in: .whitespaces).caseInsensitiveCompare(target) == .orderedSame } }
+}
+
+func matching(_ elements: [AXUIElement], _ target: String) -> [AXUIElement] {
+  let whole = elements.filter(named(target))
+  return whole.isEmpty ? elements.filter(partNamed(target)) : whole
+}
+
 func onScreen(_ w: AXUIElement, _ udid: String, _ target: String) -> [AXUIElement] {
-  let matches = screenElements(w, udid).filter(named(target))
+  let matches = matching(screenElements(w, udid), target)
   return matches.isEmpty ? waitFor(5, { () -> [AXUIElement]? in
-    let m = screenElements(w).filter(named(target))
+    let m = matching(screenElements(w), target)
     return m.isEmpty ? nil : m
   }) ?? [] : matches
 }
@@ -328,7 +340,7 @@ func onScreenOrFail(_ w: AXUIElement, _ udid: String, _ target: String) -> AXUIE
     matches = onScreen(w, udid, String(target[..<hash]))
   }
   guard !matches.isEmpty else {
-    let have = screenElements(w).map(label).filter { !$0.isEmpty }.joined(separator: ", ")
+    let have = screenElements(w).map(label).filter { !$0.isEmpty }.map { "\"\($0)\"" }.joined(separator: ", ")
     fail("Nothing on screen called \"\(target)\". On screen: \(have)")
   }
   if let pick {
@@ -997,6 +1009,12 @@ case "controls":
   for b in controls(w) { print(str(b, "AXDescription")) }
 case "press" where args.count == 3:
   press(w, args[2])
+  // Keep the turn count true for touches when rotating by hand.
+  switch args[2].lowercased() {
+  case "rotate right": recordTurns(target, recordedTurns(target) + 1)
+  case "rotate left": recordTurns(target, recordedTurns(target) - 1)
+  default: break
+  }
 case "pose" where args.count == 3:
   let labels = ["closed": "Closed", "partial": "Partially Open", "open": "Open"]
   guard let label = labels[args[2]] else { fail(usage) }
@@ -1004,9 +1022,14 @@ case "pose" where args.count == 3:
   settle(w, target, live: args[2] == "closed" ? .outer : .inner, since: started, label)
 case "rotate":
   let times = args.count > 2 ? Int(args[2]) ?? 1 : 1
+  // Some devices (the iPhone SE) only offer Rotate Left; three of those turn
+  // the device right once.
+  let hasRight = controls(w).contains { str($0, "AXDescription").caseInsensitiveCompare("Rotate Right") == .orderedSame }
   for _ in 0..<times {
-    press(w, "Rotate Right")
-    usleep(700_000)
+    for _ in 0..<(hasRight ? 1 : 3) {
+      press(w, hasRight ? "Rotate Right" : "Rotate Left")
+      usleep(700_000)
+    }
   }
   recordTurns(target, recordedTurns(target) + times)
 case "tree":

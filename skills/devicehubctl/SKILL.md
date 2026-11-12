@@ -100,7 +100,11 @@ you hand simulator work to a subagent, say so alongside the UDID.
 - `tap` matches a label exactly (case-insensitive) or an identifier, and then
   presses that element. If nothing matches it lists what's on screen. If several
   match and only one is a control, it presses that one; otherwise it lists them
-  as `Label#1`, `Label#2`, and you pick with `tap "Label#2"`.
+  as `Label#1`, `Label#2`, and you pick with `tap "Label#2"`. When nothing has
+  the whole label, a part between commas matches: SwiftUI joins a list row into
+  one button labelled `SPELL · ABUNDANCE, Bay Leaf Wish, Gives a...`, and
+  `tap "Bay Leaf Wish"` presses it. The failure message quotes each label, so
+  a row's parts aren't mistaken for separate elements.
 - `type "<text>"` types into the focused field by pressing the on-screen
   keyboard's keys, about one a second. Focus the field first (`touch` it, or
   `tap` it and check the keyboard came up). Text goes in at the cursor, which a
@@ -125,8 +129,12 @@ digitizer service, on the Duo's inner display too.
   isn't black. `--display outer|inner` overrides that.
 - Drags scroll lists and move the Split View divider. A drag across the Home
   Screen does not turn the page.
-- Touches follow rotations made with `rotate`. One made by hand in DeviceHub
-  isn't seen, so rotate only with `devicehubctl`. Upside down is unchecked.
+- Touches follow rotations made with `rotate` or with `press "Rotate Left"` /
+  `press "Rotate Right"`. One made by hand in DeviceHub isn't seen, so rotate
+  only with `devicehubctl`. Upside down is unchecked.
+- Some devices offer only Rotate Left (the iPhone SE 3rd generation on iOS
+  26.5). There `rotate` presses it three times per turn, so `rotate` still
+  means 90° right everywhere.
 - Single finger only. No pinch.
 
 ## Split View on a Duo

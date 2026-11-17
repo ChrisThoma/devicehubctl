@@ -19,6 +19,13 @@ devicehubctl <udid> split Settings   # Split View on the Duo
 More about it:
 [individuation.dev/projects/devicehubctl](https://individuation.dev/projects/devicehubctl/).
 
+Guides:
+[How to test an app on the iPhone Duo simulator](https://individuation.dev/guides/test-apps-on-the-iphone-duo-simulator/)
+covers each pose, screenshots of each display, and when to use devicehubctl or
+Claude Code Desktop's simulator pane.
+[iPhone Duo screen sizes, size classes and hinge angles](https://individuation.dev/guides/iphone-duo-screen-sizes/)
+has the numbers an app sees in each pose, measured with devicehubctl.
+
 ## Why
 
 In Xcode 27, DeviceHub replaced Simulator.app, and the only way to change an

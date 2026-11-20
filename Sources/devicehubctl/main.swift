@@ -802,6 +802,10 @@ let hingeHelperSource = #"""
 #import <dlfcn.h>
 typedef struct { long long w[8]; } Swap;     // SBFDisplayToolSwapSettings, 64 bytes
 typedef struct { long long w[15]; } Replay;  // SBFHingeReplaySettings, 120 bytes
+@interface CMAngleManager : NSObject
+- (void)startAngleUpdatesToQueue:(NSOperationQueue *)q handler:(void (^)(id angle))h;
+- (void)stopAngleUpdates;
+@end
 @interface SBSDisplayToolServiceConnection : NSObject
 - (void)swapDisplayWithSettings:(Swap)s completionHandler:(void (^)(NSError *))c;
 - (void)replayHingeSamplesWithSettings:(Replay)s samplesPath:(NSString *)p completionHandler:(void (^)(NSError *))c;
@@ -816,6 +820,22 @@ static NSError *await(void (^call)(void (^)(NSError *))) {
   return result;
 }
 int main(int argc, char **argv) { @autoreleasepool {
+  if (argc == 2 && !strcmp(argv[1], "angle")) {
+    // CoreMotion's hinge angle: the one DeviceHub's pose buttons set.
+    dlopen("/System/Library/Frameworks/CoreMotion.framework/CoreMotion", RTLD_NOW);
+    CMAngleManager *m = [NSClassFromString(@"CMAngleManager") new];
+    __block double degrees = -1;
+    dispatch_semaphore_t got = dispatch_semaphore_create(0);
+    [m startAngleUpdatesToQueue:[NSOperationQueue new] handler:^(id a) {
+      degrees = [[a valueForKey:@"angleDegrees"] doubleValue];
+      dispatch_semaphore_signal(got);
+    }];
+    long late = dispatch_semaphore_wait(got, dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC));
+    [m stopAngleUpdates];
+    if (late) return 1;
+    printf("%.1f\n", degrees);
+    return 0;
+  }
   dlopen("/System/Library/PrivateFrameworks/SpringBoardServices.framework/SpringBoardServices", RTLD_NOW);
   void *foundation = dlopen("/System/Library/PrivateFrameworks/SpringBoardFoundation.framework/SpringBoardFoundation", RTLD_NOW);
   BOOL (*parseSwap)(NSArray *, Swap *, NSError **) = dlsym(foundation, "SBFDisplayToolSwapSettingsFromArguments");
@@ -841,7 +861,12 @@ int main(int argc, char **argv) { @autoreleasepool {
     Swap s = {0}; NSError *e = nil;
     if (!parseSwap(args, &s, &e)) { fprintf(stderr, "%s\n", e.localizedDescription.UTF8String); return 2; }
     NSDate *start = [NSDate date];
-    e = await(^(void (^r)(NSError *)) { [c swapDisplayWithSettings:s completionHandler:r]; });
+    // Right after a pose press SpringBoard can still be finishing that swap.
+    for (int tries = 0; tries < 20; tries++) {
+      e = await(^(void (^r)(NSError *)) { [c swapDisplayWithSettings:s completionHandler:r]; });
+      if (!e || ![e.localizedDescription containsString:@"in flight"]) break;
+      usleep(500000);
+    }
     if (e) { fprintf(stderr, "%s: %s\n", argv[i], e.localizedDescription.UTF8String); return 1; }
     printf("%s took %.2f s\n", argv[i], -start.timeIntervalSinceNow); fflush(stdout);
     if (hold > 0) usleep(hold * 1e6);
@@ -880,13 +905,83 @@ func hingeHelper() -> String {
   return path
 }
 
-func runHingeHelper(_ udid: String, _ arguments: [String]) -> Never {
+func runHingeHelper(_ udid: String, _ arguments: [String]) -> Int32 {
   let p = Process()
   p.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
   p.arguments = ["simctl", "spawn", udid, hingeHelper()] + arguments
   try! p.run()
   p.waitUntilExit()
-  exit(p.terminationStatus)
+  return p.terminationStatus
+}
+
+// The angle the last sweep left the hinge at, kept per simulator. DeviceHub
+// doesn't know it: its own angle stays where its last pose button put it, and
+// it sends that angle again with every rotation (on a Duo, orientation reaches
+// SpringBoard as a device pose that carries the hinge too). So `rotate` puts
+// the swept angle back afterwards. A pose press or a replay clears it.
+func sweptFile(_ udid: String) -> String {
+  (NSTemporaryDirectory() as NSString).appendingPathComponent("devicehubctl-swept-\(udid)")
+}
+func sweptAngle(_ udid: String) -> Double? {
+  (try? String(contentsOfFile: sweptFile(udid), encoding: .utf8)).flatMap { Double($0) }
+}
+func recordSwept(_ udid: String, _ degrees: Double?) {
+  if let degrees {
+    try? String(degrees).write(toFile: sweptFile(udid), atomically: true, encoding: .utf8)
+  } else {
+    try? FileManager.default.removeItem(atPath: sweptFile(udid))
+  }
+}
+
+// MARK: State
+
+// SpringBoard logs the device pose it is using whenever it holds back or applies
+// an orientation change: after every fold, sweep and rotation. The last such
+// line is the hinge and orientation apps have, which neither DeviceHub nor
+// CoreMotion knows after a sweep.
+struct Pose { var degrees: String, status: String, device: String, cover: String?, at: Date }
+
+func springBoardPose(_ udid: String) -> Pose? {
+  let log = output("/usr/bin/xcrun", ["simctl", "spawn", udid, "log", "show", "--last", "1h", "--style", "compact",
+                                      "--predicate", "process == \"SpringBoard\" AND eventMessage CONTAINS \"currentPose:\""]).text
+  guard let line = log.split(separator: "\n").last(where: { $0.contains("currentPose:") }) else { return nil }
+  let text = String(line)
+  let pattern = #"currentPose: ([0-9.]+)° \([^)]*\): ([A-Za-z]+)[^\[]*\[device:([A-Za-z]+)(?: cover:([A-Za-z]+))?\]"#
+  guard let re = try? NSRegularExpression(pattern: pattern),
+        let m = re.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)) else { return nil }
+  func group(_ i: Int) -> String? { Range(m.range(at: i), in: text).map { String(text[$0]) } }
+  let stamp = DateFormatter()
+  stamp.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+  let at = stamp.date(from: String(text.prefix(23))) ?? Date()
+  return Pose(degrees: group(1) ?? "?", status: group(2) ?? "?", device: group(3) ?? "?", cover: group(4), at: at)
+}
+
+func orientationName(_ code: String) -> String {
+  ["Pu": "portrait", "Pd": "upside down", "Ll": "landscape left", "Lr": "landscape right", "Fu": "face up", "Fd": "face down"][code] ?? code
+}
+
+func state(_ udid: String) {
+  let duo = isDuo(udid)
+  if duo {
+    if let p = springBoardPose(udid) {
+      let age = Int(Date().timeIntervalSince(p.at))
+      let cover = p.cover.map { ", outer display \(orientationName($0))" } ?? ""
+      print("hinge: \(p.degrees)° \(p.status), device \(orientationName(p.device))\(cover) (SpringBoard, \(age) s ago)")
+    } else {
+      print("hinge: SpringBoard hasn't logged a pose in the last hour")
+    }
+    let own = output("/usr/bin/xcrun", ["simctl", "spawn", udid, hingeHelper(), "angle"])
+    let angle = own.status == 0 ? own.text.trimmingCharacters(in: .whitespacesAndNewlines) + "°" : "unknown"
+    print("DeviceHub's hinge: \(angle) (pose and rotate move the hinge here)")
+    if let swept = sweptAngle(udid) { print("last sweep: \(String(format: "%g", swept))° (rotate sweeps back to it)") }
+  }
+  for (name, number) in duo ? [("outer", 1), ("inner", 3)] : [("screen", 1)] {
+    guard let shot = screenshot(udid, number, fresh: true) else { print("\(name) display: no screenshot"); continue }
+    let live = shot.grey.contains { $0 > 8 }
+    let shape = shot.size.width > shot.size.height ? "landscape" : "portrait"
+    print("\(name) display: \(live ? "live" : "black"), \(shape) (\(Int(shot.size.width))x\(Int(shot.size.height)))")
+  }
+  print("rotations recorded: \(recordedTurns(udid)) (quarter turns right, for touches)")
 }
 
 // degrees:seconds[:hold], checked here so a typo fails before anything moves.
@@ -911,19 +1006,26 @@ func hinge(_ udid: String, _ rest: [String]) -> Never {
     guard rest.count >= 2, ["fast", "medium", "slow"].contains(rest[1]) else { fail(usage) }
     let direction = rest.count > 2 ? rest[2] : "both"
     guard ["open", "close", "both"].contains(direction) else { fail(usage) }
-    runHingeHelper(udid, ["replay", "-band=" + rest[1], "-count=1", "-direction=" + direction])
+    // Where a replay ends isn't known here, so nothing is put back after a rotate.
+    recordSwept(udid, nil)
+    exit(runHingeHelper(udid, ["replay", "-band=" + rest[1], "-count=1", "-direction=" + direction]))
   case "timeline"?:
     guard rest.count > 1 else { fail(usage) }
-    runHingeHelper(udid, ["sweep"] + rest.dropFirst().map(hingeStep))
+    let steps = rest.dropFirst().map(hingeStep)
+    let status = runHingeHelper(udid, ["sweep"] + steps)
+    if status == 0 { recordSwept(udid, Double(steps.last!.split(separator: ":")[0])) }
+    exit(status)
   default:
     guard (1...2).contains(rest.count), Double(rest[0]) != nil, rest.count == 1 || Double(rest[1]) != nil else { fail(usage) }
     _ = hingeStep(rest.joined(separator: ":"))
     let seconds = rest.count > 1 ? rest[1] : "2"
-    runHingeHelper(udid, ["sweep", "\(rest[0]):\(seconds):0:\(profile)"])
+    let status = runHingeHelper(udid, ["sweep", "\(rest[0]):\(seconds):0:\(profile)"])
+    if status == 0 { recordSwept(udid, Double(rest[0])) }
+    exit(status)
   }
 }
 
-let version = "0.5.0"
+let version = "0.6.0"
 
 let usage = """
 usage: devicehubctl <udid> controls            list the device's buttons
@@ -936,7 +1038,10 @@ usage: devicehubctl <udid> controls            list the device's buttons
        devicehubctl <udid> hinge timeline <degrees>[:<seconds>[:<hold>]] ...
        devicehubctl <udid> hinge replay fast|medium|slow [open|close|both]
                                                play a fold recorded from a real Duo
-       devicehubctl <udid> rotate [times]      rotate right, 90 degrees each
+       devicehubctl <udid> rotate [times]      rotate right, 90 degrees each (after a
+                                               hinge sweep, sweeps back to its angle)
+       devicehubctl <udid> state               hinge angle and status apps have, which
+                                               display is live, and its orientation
        devicehubctl <udid> tree                what's on the device's screen
        devicehubctl <udid> tap <label|id>      tap something on the screen
                                                (<label>#2 picks the second of several)
@@ -946,10 +1051,11 @@ usage: devicehubctl <udid> controls            list the device's buttons
        devicehubctl <udid> split <icon> [<bundle id>]
                                                open a Home Screen app in Split View,
                                                and launch another app beside it
-       devicehubctl <udid> touch <x> <y> [seconds]
+       devicehubctl <udid> touch <x> <y> [<x> <y> ...] [seconds]
        devicehubctl <udid> drag <x1> <y1> <x2> <y2> [seconds]
                                                touch or drag at fractions (0-1) of
-                                               the display's simctl screenshot
+                                               the display's simctl screenshot.
+                                               Several touches go 0.3 s apart
 
 <udid> may be "booted" when exactly one simulator is booted.
 On an iPhone Duo, touches go to the live display. --display outer|inner
@@ -969,7 +1075,7 @@ if let i = args.firstIndex(of: "--display") {
 guard args.count >= 2 else { fail(usage) }
 let udid = args[0]
 
-// touch, drag and hinge don't need DeviceHub's window, only a booted simulator.
+// touch, drag, state and hinge don't need DeviceHub's window, only a booted simulator.
 func numbers(_ from: ArraySlice<String>) -> [Double] {
   let n = from.compactMap(Double.init)
   guard n.count == from.count else { fail(usage) }
@@ -979,18 +1085,37 @@ if args[1] == "touch" || args[1] == "drag" {
   let device = simDevice(udid)
   guard device.state == "Booted" else { fail("\(device.name) is \(device.state). Boot it first: xcrun simctl boot \(device.udid)") }
   let n = numbers(args[2...])
-  let points = args[1] == "touch" ? 2 : 4
+  let points = args[1] == "touch" ? max(2, n.count / 2 * 2) : 4
   guard n.count == points || n.count == points + 1 else { fail(usage) }
   guard n.prefix(points).allSatisfy({ (0...1).contains($0) }) else {
     fail("x and y are fractions of the screenshot, from 0 to 1.")
   }
   let d = liveDisplay(device.udid, override: displayOverride)
-  if points == 2 {
-    hold(device.udid, display: digitizerTarget(d), touchPoint((n[0], n[1]), device.udid, on: d), seconds: n.count > 2 ? n[2] : 0.1)
+  if args[1] == "touch" {
+    // Several points go over one connection, 0.3 s apart, so they land inside
+    // whatever window an app gives (a menu that fades, a double tap) instead of
+    // 3 to 4 s apart as separate runs.
+    let seconds = n.count > points ? n[points] : 0.1
+    let at = stride(from: 0, to: points, by: 2).map { touchPoint((n[$0], n[$0 + 1]), device.udid, on: d) }
+    touches(device.udid, display: digitizerTarget(d)) { send in
+      for (i, p) in at.enumerated() {
+        if i > 0 { usleep(300_000) }
+        send(.start, p)
+        usleep(useconds_t(seconds * 1_000_000))
+        send(.end, p)
+      }
+    }
   } else {
     drag(device.udid, display: digitizerTarget(d), from: touchPoint((n[0], n[1]), device.udid, on: d),
          to: touchPoint((n[2], n[3]), device.udid, on: d), seconds: n.count > 4 ? n[4] : 0.5)
   }
+  exit(0)
+}
+
+if args[1] == "state" {
+  let device = simDevice(udid)
+  guard device.state == "Booted" else { fail("\(device.name) is \(device.state). Boot it first: xcrun simctl boot \(device.udid)") }
+  state(device.udid)
   exit(0)
 }
 
@@ -1019,6 +1144,7 @@ case "pose" where args.count == 3:
   let labels = ["closed": "Closed", "partial": "Partially Open", "open": "Open"]
   guard let label = labels[args[2]] else { fail(usage) }
   press(w, label)
+  recordSwept(target, nil)
   settle(w, target, live: args[2] == "closed" ? .outer : .inner, since: started, label)
 case "rotate":
   let times = args.count > 2 ? Int(args[2]) ?? 1 : 1
@@ -1032,6 +1158,18 @@ case "rotate":
     }
   }
   recordTurns(target, recordedTurns(target) + times)
+  if let degrees = sweptAngle(target) {
+    // DeviceHub's rotation carried its own hinge angle; sweep back.
+    usleep(700_000)
+    let back = String(format: "%g", degrees)
+    // Below 85 degrees the fade profile, which hands the display off near 85,
+    // so a sweep back from DeviceHub's closed pose doesn't light the inner display.
+    if runHingeHelper(target, ["sweep", "\(back):0:0:\(degrees < 85 ? "fade" : "")"]) == 0 {
+      print("DeviceHub's rotate moved the hinge to its own pose; swept it back to \(back)°.")
+    } else {
+      FileHandle.standardError.write("DeviceHub's rotate moved the hinge to its own pose, and sweeping back to \(back)° failed.\n".data(using: .utf8)!)
+    }
+  }
 case "tree":
   let elements = screenElements(w, target)
   guard !elements.isEmpty else { fail("DeviceHub isn't showing anything on this device's screen yet.") }

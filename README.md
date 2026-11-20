@@ -10,6 +10,7 @@ their screen, through Xcode 27's DeviceHub.
 devicehubctl <udid> pose open        # iPhone Duo: closed, partial or open
 devicehubctl <udid> hinge 60         # or any angle from 0 to 180
 devicehubctl <udid> rotate           # 90° right
+devicehubctl <udid> state            # hinge angle, live display, orientation
 devicehubctl <udid> tree             # what's on the device's screen
 devicehubctl <udid> tap "Continue"   # tap it
 devicehubctl <udid> type "Hello"     # type into the focused field
@@ -69,7 +70,8 @@ cp .build/release/devicehubctl /usr/local/bin/
 | `devicehubctl <udid> hinge <degrees> [seconds] [--fade\|--continuous]` | Sweep a Duo's hinge to any angle from 0 to 180 |
 | `devicehubctl <udid> hinge timeline <degrees>[:<seconds>[:<hold>]] ...` | Run several sweeps in a row. Each adds about 0.6 s |
 | `devicehubctl <udid> hinge replay fast\|medium\|slow [open\|close\|both]` | Play a fold recorded from a real Duo |
-| `devicehubctl <udid> rotate [times]` | Rotate right, 90° each time |
+| `devicehubctl <udid> rotate [times]` | Rotate right, 90° each time. After a `hinge` sweep, it sweeps back to that angle |
+| `devicehubctl <udid> state` | The hinge angle, status and orientation apps have, DeviceHub's own hinge angle, and which display is live |
 | `devicehubctl <udid> controls` | List the buttons under the device |
 | `devicehubctl <udid> press "<label>"` | Press one of them, e.g. `Home` |
 | `devicehubctl <udid> tree` | List what's on the screen: role, label, value (what VoiceOver speaks, e.g. `3 times` for a stepper), identifier |
@@ -77,7 +79,7 @@ cp .build/release/devicehubctl /usr/local/bin/
 | `devicehubctl <udid> type "<text>"` | Type into the focused field with the on-screen keyboard |
 | `devicehubctl <udid> longpress "<label or id>" [seconds]` | Touch and hold it, 1.2 seconds unless you say otherwise |
 | `devicehubctl <udid> split "<icon>" [<bundle id>]` | Open a Home Screen app in Split View, and launch another app beside it |
-| `devicehubctl <udid> touch <x> <y> [seconds]` | Touch a point, 0.1 seconds unless you say otherwise |
+| `devicehubctl <udid> touch <x> <y> [<x> <y> ...] [seconds]` | Touch a point, 0.1 seconds unless you say otherwise. Several points are touched in turn, 0.3 s apart |
 | `devicehubctl <udid> drag <x1> <y1> <x2> <y2> [seconds]` | Drag from one point to another, 0.5 seconds unless you say otherwise |
 
 `<udid>` comes from `xcrun simctl list devices`. You can pass `booted` when exactly
@@ -149,6 +151,33 @@ one stayed live.
 The angle stays where the sweep left it until DeviceHub moves the hinge. DeviceHub
 doesn't see sweeps, so a `pose` afterwards starts from DeviceHub's own last angle.
 
+DeviceHub's rotate moves the hinge too. On a Duo, orientation reaches SpringBoard
+as a device pose that carries the hinge angle, and DeviceHub sends its own angle
+with it. So `rotate` after a sweep sweeps back to the swept angle, and prints that
+it did. Apps still see the hinge go to DeviceHub's angle and back, about a second
+in all: rotated at a swept 60 degrees with DeviceHub open, an app gets the inner
+display open flat, then the outer display again. With DeviceHub's pose on the
+same display as the swept angle (`pose closed`, then `hinge 60`), the outer
+display stays live throughout: below 85 degrees the sweep back uses the `--fade`
+profile, which hands the display off near 85. A `pose` or a `hinge replay` clears
+the remembered angle.
+
+`state` prints what an app has, read from SpringBoard's log of the device pose it
+uses, next to DeviceHub's own angle and each display's screenshot:
+
+```
+hinge: 60.0° closed, device landscape left, outer display landscape right (SpringBoard, 4 s ago)
+DeviceHub's hinge: 0.0° (pose and rotate move the hinge here)
+last sweep: 60° (rotate sweeps back to it)
+outer display: live, landscape (2034x1398)
+inner display: black, landscape (2853x2007)
+rotations recorded: 0 (quarter turns right, for touches)
+```
+
+SpringBoard logs a pose after each fold, sweep and rotation, so the line is the
+latest one, with its age. Status is what SpringBoard reports: at a swept 60 degrees
+it says `closed`, as `UIHinge.status` does. `state` takes about 8 seconds.
+
 `hinge` needs only a booted simulator, not DeviceHub's window or Accessibility
 access. The first time, it builds a small helper for the simulator and caches it
 in `~/Library/Caches/devicehubctl`. It runs the helper inside the simulator with
@@ -160,6 +189,10 @@ injected and SpringBoard isn't changed.
 `tap` presses an element through accessibility, which isn't a finger. `longpress`,
 `split`, `touch` and `drag` send real touches to the simulator's digitizer service,
 the way idb does, except they also reach the Duo's inner display.
+
+A `touch` with several points sends them over one connection, 0.3 s apart, so
+they all land inside a window an app gives, a menu that fades after a few seconds
+or a double tap. Separate `touch` runs take 3 to 4 s each.
 
 `touch` and `drag` take points as fractions, 0 to 1, of the screenshot
 `xcrun simctl io <udid> screenshot --display=N` saves, from its top left corner,

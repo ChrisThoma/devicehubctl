@@ -30,6 +30,7 @@ devicehubctl <udid> hinge <degrees> [seconds] [--fade|--continuous]   # any angl
 devicehubctl <udid> hinge timeline <degrees>[:<seconds>[:<hold>]] ...
 devicehubctl <udid> hinge replay fast|medium|slow [open|close|both]   # a real Duo's fold
 devicehubctl <udid> rotate [times]             # 90° right each time
+devicehubctl <udid> state                      # hinge, live display, orientation
 devicehubctl <udid> controls                   # the bar under the device
 devicehubctl <udid> press "<label>"            # any of those, e.g. Home
 devicehubctl <udid> tree                       # what's on the device's screen
@@ -37,7 +38,7 @@ devicehubctl <udid> tap "<label or id>"        # tap something listed by tree
 devicehubctl <udid> type "<text>"              # type with the on-screen keyboard
 devicehubctl <udid> longpress "<label or id>" [seconds]   # touch and hold, 1.2 s
 devicehubctl <udid> split "<icon>" [<bundle id>]          # Duo Split View
-devicehubctl <udid> touch <x> <y> [seconds]               # real touch at a point
+devicehubctl <udid> touch <x> <y> [<x> <y> ...] [seconds]  # real touches, 0.3 s apart
 devicehubctl <udid> drag <x1> <y1> <x2> <y2> [seconds]    # real drag, 0.5 s
 ```
 
@@ -80,6 +81,17 @@ open slowly, or flap. Default sweep is 2 s; `seconds` 0 still takes about 0.3 s.
 - `hinge replay` returns at once, before the fold has finished.
 - Apps get an update per degree moved, not a timed stream, and none during a hold.
 - A `pose` after a sweep starts from DeviceHub's own last angle, not the app's.
+- DeviceHub's rotate sends its own hinge angle along with the orientation, so
+  `rotate` after a sweep sweeps back to the swept angle and says so. Apps still
+  see the hinge visit DeviceHub's angle for about a second (at a swept 60 with
+  DeviceHub open, the inner display opens flat and closes again). When tenting,
+  `pose closed` first, then `hinge 60`: a rotate then keeps the outer display
+  live throughout.
+- `state` prints the hinge angle, status and orientation apps have (from
+  SpringBoard's log, with its age), DeviceHub's own angle, and which display is
+  live. Use it instead of adding logging to the app. About 8 s.
+- Several points in one `touch` land 0.3 s apart; separate runs take 3 to 4 s
+  each, too slow for a control that fades or a double tap.
 - Tested on the iOS 27.1 runtime only. A new Xcode could break it, because it
   uses a private SpringBoard service and a simulator-only helper it builds on
   first use.
